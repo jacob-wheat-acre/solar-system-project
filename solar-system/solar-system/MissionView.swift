@@ -161,18 +161,19 @@ struct MissionInfoCard: View {
     var body: some View {
         let t = date.timeIntervalSince1970
         let (last, next) = mission.events(around: date)
-        VStack(alignment: .leading, spacing: 6) {
+        CollapsibleInfoCard {
             Text(mission.info.name.uppercased())
                 .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
             if date < mission.start {
                 Text("Launches in \(Self.duration(mission.start.timeIntervalSince(date)))").font(.headline)
             } else {
                 Text(last?.title ?? "Launch").font(.headline)
-                if let d = last?.detail {
-                    Text(d).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
                 Text("T+ \(Self.duration(t - mission.start.timeIntervalSince1970))")
                     .font(.system(.caption, design: .monospaced))
+            }
+        } details: {
+            if date >= mission.start, let d = last?.detail {
+                Text(d).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             ForEach(stats(t), id: \.0) { row in
                 HStack {
@@ -194,10 +195,6 @@ struct MissionInfoCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(12)
-        .frame(maxWidth: 300, alignment: .leading)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     /// Distance / speed rows for each spacecraft in flight.

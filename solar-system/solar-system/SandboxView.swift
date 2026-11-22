@@ -249,12 +249,17 @@ struct SandboxInfoCard: View {
 
     var body: some View {
         let sim = state.sim
-        VStack(alignment: .leading, spacing: 6) {
+        CollapsibleInfoCard {
             Text(state.scenario.name.uppercased())
                 .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            if let i = state.followedIndex { Text(sim.bodies[i].name).font(.headline) }
+            if let event = sim.log.last {
+                Text("\(event.message) · T + \(SandboxFormat.elapsed(event.time))")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } details: {
             if let i = state.followedIndex {
-                let b = sim.bodies[i]
-                Text(b.name).font(.headline)
                 ForEach(rows(sim, i), id: \.0) { row in
                     HStack {
                         Text(row.0).foregroundStyle(.secondary)
@@ -279,20 +284,11 @@ struct SandboxInfoCard: View {
                 }
                 Text(note).font(.caption2).foregroundStyle(.tertiary)
             }
-            if let event = sim.log.last {
-                Text("\(event.message) · T + \(SandboxFormat.elapsed(event.time))")
-                    .font(.caption).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             if !state.options.relativity && !state.options.gravitationalWaves && sim.log.isEmpty {
                 Text("Energy drift \(String(format: "%.1e", sim.energyDrift))")
                     .font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary)
             }
         }
-        .padding(12)
-        .frame(maxWidth: 300, alignment: .leading)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
     private func stat(_ k: String, _ v: String) -> some View {

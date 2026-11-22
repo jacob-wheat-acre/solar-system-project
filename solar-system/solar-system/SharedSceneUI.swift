@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import SceneKit
 import SpriteKit
 import simd
@@ -132,5 +133,40 @@ final class LabelOverlay {
             l.isHidden = false
             l.position = CGPoint(x: CGFloat(p.x) + 7, y: y + 4)
         }
+    }
+}
+
+/// The translucent info card in the corner of the Missions and Sandbox scenes.
+/// The header always shows; tapping the card shows or hides the details. On iPhone it
+/// starts collapsed so it doesn't cover the action; elsewhere it starts expanded.
+struct CollapsibleInfoCard<Header: View, Details: View>: View {
+    @ViewBuilder let header: Header
+    @ViewBuilder let details: Details
+    @State private var expanded: Bool?
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    private var defaultExpanded: Bool { sizeClass != .compact }
+    #else
+    private var defaultExpanded: Bool { true }
+    #endif
+
+    var body: some View {
+        let open = expanded ?? defaultExpanded
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) { header }
+                Spacer(minLength: 8)
+                Image(systemName: open ? "chevron.down" : "chevron.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            if open { details }
+        }
+        .padding(open ? 12 : 9)
+        .frame(maxWidth: open ? 300 : 240, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { withAnimation(.snappy(duration: 0.2)) { expanded = !open } }
     }
 }

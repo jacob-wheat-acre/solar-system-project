@@ -899,26 +899,7 @@ final class SolarSystemScene {
     }
 
     private func buildMilkyWayBand(radius: CGFloat) {
-        // Galactic plane torus — axis aimed at galactic north pole (ecl lon≈180°, lat≈+30°).
-        // R_z(+60°) rotates +Y to (-0.866, 0.5, 0), matching that direction.
-        let torus = SCNTorus(ringRadius: radius * 0.998, pipeRadius: radius * 0.055)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = NSColorLike(white: 0.92, alpha: 0.10)
-        mat.isDoubleSided = true; mat.lightingModel = .constant
-        torus.materials = [mat]
-        let node = SCNNode(geometry: torus)
-        node.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 3)
-        celestialRoot.addChildNode(node)
-
-        // Brighter inner band core (galactic equator)
-        let core = SCNTorus(ringRadius: radius * 0.998, pipeRadius: radius * 0.018)
-        let coreMat = SCNMaterial()
-        coreMat.diffuse.contents = NSColorLike(white: 1.0, alpha: 0.18)
-        coreMat.isDoubleSided = true; coreMat.lightingModel = .constant
-        core.materials = [coreMat]
-        let coreNode = SCNNode(geometry: core)
-        coreNode.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 3)
-        celestialRoot.addChildNode(coreNode)
+        celestialRoot.addChildNode(MilkyWay.makeNode(radius: radius))
     }
 
     private func buildGalacticMarkers(radius: CGFloat) {
@@ -1096,6 +1077,150 @@ enum CelestialCatalog {
               stars: [(345,7),(352,5),(358,14),(10,19),(20,20)],
               lines: [(0,1),(1,2),(2,3),(3,4)]),
     ]
+}
+
+// MARK: - Milky Way
+
+/// Procedural Milky Way: a soft additive glow mesh plus a faint star cloud,
+/// laid out in real galactic coordinates (l, b) and converted to this scene's
+/// ecliptic frame (+X vernal equinox, +Y ecliptic north, +Z summer solstice).
+/// Brighter/wider toward the galactic center (Sagittarius), with a Cygnus
+/// star cloud and a Great Rift dust lane between them.
+enum MilkyWay {
+    static func makeNode(radius: CGFloat) -> SCNNode {
+        let node = SCNNode()
+        node.name = "MilkyWay"
+        node.addChildNode(glowNode(radius: radius * 0.995))
+        node.addChildNode(starCloudNode(radius: radius * 0.99))
+        return node
+    }
+
+    // Galactic (l, b) in degrees → scene position on a sphere of `radius`.
+    static func toScene(lDeg: Double, bDeg: Double, radius: CGFloat) -> SCNVector3 {
+        let l = lDeg * .pi / 180, b = bDeg * .pi / 180
+        let g = (cos(b) * cos(l), cos(b) * sin(l), sin(b))
+        // Galactic → ICRS (transpose of the IAU ICRS→galactic matrix)
+        let xq = -0.0548755604 * g.0 + 0.4941094279 * g.1 - 0.8676661490 * g.2
+        let yq = -0.8734370902 * g.0 - 0.4448296300 * g.1 - 0.1980763734 * g.2
+        let zq = -0.4838350155 * g.0 + 0.7469822445 * g.1 + 0.4559837762 * g.2
+        // Equatorial → ecliptic (J2000 obliquity)
+        let eps = 23.4392911 * Double.pi / 180
+        let ye =  cos(eps) * yq + sin(eps) * zq
+        let ze = -sin(eps) * yq + cos(eps) * zq
+        let r = Double(radius)
+        return SCNVector3(SceneFloat(xq * r), SceneFloat(ze * r), SceneFloat(ye * r))
+    }
+
+    /// Half-width (degrees) of the band at galactic longitude l: thicker at the bulge.
+    private static func sigma(_ l: Double) -> Double { 4.5 + 6.0 * exp(-pow(l / 30, 2)) }
+
+    /// Relative surface brightness along the plane.
+    private static func alongPlane(_ l: Double) -> Double {
+        0.30 + 0.70 * exp(-pow(l / 55, 2)) + 0.25 * exp(-pow((l - 75) / 18, 2))
+    }
+
+    private static func wrap(_ l: Double) -> Double {
+        var x = l.truncatingRemainder(dividingBy: 360)
+        if x > 180 { x -= 360 }; if x < -180 { x += 360 }
+        return x
+    }
+
+    /// Glow intensity at (l, b), 0…~1.
+    private static func intensity(l lRaw: Double, b: Double) -> Double {
+        let l = wrap(lRaw)
+        let band  = alongPlane(l) * exp(-pow(b / sigma(l), 2))
+        let bulge = 0.55 * exp(-(l * l + b * b * 1.8) / (11 * 11))
+        // Great Rift: dark lane just north of the plane from Cygnus to Sagittarius
+        let riftWindow = exp(-pow((l - 35) / 38, 2))
+        let rift = 1 - 0.6 * riftWindow * exp(-pow((b - 1.2) / 1.8, 2))
+        // Cheap clumpiness so the band isn't a smooth tube
+        let clump = 0.78 + 0.22 * sin(l * 0.19 + 1.3 * sin(b * 0.45)) * cos(b * 0.6 - l * 0.07)
+        return (band * rift * clump) + bulge
+    }
+
+    private static func glowNode(radius: CGFloat) -> SCNNode {
+        let lStep = 1.5, bMax = 28.0, bStep = 1.0
+        let cols = Int(360 / lStep) + 1, rows = Int(2 * bMax / bStep) + 1
+        var verts: [SCNVector3] = []; verts.reserveCapacity(cols * rows)
+        var colors: [Float] = [];     colors.reserveCapacity(cols * rows * 4)
+        let peak: Double = 0.20      // overall strength on screen (additive)
+        for c in 0..<cols {
+            let l = Double(c) * lStep
+            let warm = exp(-pow(wrap(l) / 45, 2))   // warmer toward the bulge
+            for r in 0..<rows {
+                let b = -bMax + Double(r) * bStep
+                verts.append(toScene(lDeg: l, bDeg: b, radius: radius))
+                let i = min(1.0, intensity(l: l, b: b)) * peak
+                colors += [Float(i * (0.85 + 0.15 * warm)),
+                           Float(i * (0.88 + 0.06 * warm)),
+                           Float(i * (1.00 - 0.18 * warm)), 1]
+            }
+        }
+        var idx: [Int32] = []; idx.reserveCapacity((cols - 1) * (rows - 1) * 6)
+        for c in 0..<(cols - 1) {
+            for r in 0..<(rows - 1) {
+                let a = Int32(c * rows + r), b = Int32((c + 1) * rows + r)
+                idx += [a, b, a + 1, a + 1, b, b + 1]
+            }
+        }
+        let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts), colorSource(colors)],
+                              elements: [SCNGeometryElement(indices: idx, primitiveType: .triangles)])
+        geo.materials = [additiveMaterial()]
+        return SCNNode(geometry: geo)
+    }
+
+    private static func starCloudNode(radius: CGFloat) -> SCNNode {
+        var rng = SplitMix64(seed: 0x4D_57_42_41_4E_44)   // fixed seed: same sky every launch
+        var verts: [SCNVector3] = []
+        var colors: [Float] = []
+        while verts.count < 3500 {
+            let l = Double.random(in: 0..<360, using: &rng)
+            guard Double.random(in: 0...1.25, using: &rng) < alongPlane(wrap(l)) else { continue }
+            // Box–Muller gaussian latitude, a bit tighter than the glow
+            let u1 = Double.random(in: Double.ulpOfOne...1, using: &rng)
+            let u2 = Double.random(in: 0...1, using: &rng)
+            let b = sqrt(-2 * log(u1)) * cos(2 * .pi * u2) * sigma(wrap(l)) * 0.6
+            verts.append(toScene(lDeg: l, bDeg: b, radius: radius))
+            let v = Float(Double.random(in: 0.18...0.55, using: &rng) * (0.6 + 0.4 * intensity(l: l, b: b)))
+            colors += [v, v * 0.97, v * 0.92, 1]
+        }
+        let el = SCNGeometryElement(indices: (0..<Int32(verts.count)).map { $0 }, primitiveType: .point)
+        el.pointSize = 1.5; el.minimumPointScreenSpaceRadius = 0.5; el.maximumPointScreenSpaceRadius = 1.6
+        let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts), colorSource(colors)], elements: [el])
+        geo.materials = [additiveMaterial()]
+        return SCNNode(geometry: geo)
+    }
+
+    private static func colorSource(_ rgba: [Float]) -> SCNGeometrySource {
+        let data = rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+        return SCNGeometrySource(data: data, semantic: .color, vectorCount: rgba.count / 4,
+                                 usesFloatComponents: true, componentsPerVector: 4,
+                                 bytesPerComponent: MemoryLayout<Float>.size,
+                                 dataOffset: 0, dataStride: MemoryLayout<Float>.size * 4)
+    }
+
+    private static func additiveMaterial() -> SCNMaterial {
+        let m = SCNMaterial()
+        m.diffuse.contents = NSColorLike.white
+        m.lightingModel = .constant
+        m.blendMode = .add
+        m.isDoubleSided = true
+        m.writesToDepthBuffer = false
+        return m
+    }
+}
+
+/// Small deterministic RNG so the procedural sky is identical on every launch.
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
 }
 
 // MARK: - Platform Color Alias

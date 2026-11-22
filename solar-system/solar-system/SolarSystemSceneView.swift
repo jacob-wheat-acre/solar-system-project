@@ -6,9 +6,15 @@ import AVFoundation
 #if os(iOS)
 import UIKit
 typealias PlatformViewRepresentable = UIViewRepresentable
+typealias SCNFloat = Float
 
-private class ZoomableSCNView: SCNView {
+class ZoomableSCNView: SCNView {
     weak var cameraNode: SCNNode?
+
+    /// Point the camera orbits around and looks at (moved per frame by views that follow a target).
+    var orbitCenter = SCNVector3Zero
+    var minDistance: Float = 5
+    var maxDistance: Float = 900
 
     private var azimuth:   Float = 0
     private var elevation: Float = -0.42
@@ -27,9 +33,9 @@ private class ZoomableSCNView: SCNView {
     func syncOrbit() {
         guard let cam = cameraNode else { return }
         let p = cam.position
-        let px = Float(p.x), py = Float(p.y), pz = Float(p.z)
+        let px = Float(p.x - orbitCenter.x), py = Float(p.y - orbitCenter.y), pz = Float(p.z - orbitCenter.z)
         let d = sqrt(px*px + py*py + pz*pz)
-        distance  = max(5, d)
+        distance  = max(minDistance, d)
         elevation = d > 0.001 ? asin(max(-1, min(1, py / d))) : 0
         azimuth   = atan2(px, pz)
     }
@@ -46,27 +52,38 @@ private class ZoomableSCNView: SCNView {
     @objc private func handlePinch(_ r: UIPinchGestureRecognizer) {
         guard r.state == .changed else { return }
         let magnification = Double(r.scale) - 1.0
-        distance = Float(max(5.0, min(900.0, Double(distance) * exp(-magnification * 2.0))))
+        distance = max(minDistance, min(maxDistance, Float(Double(distance) * exp(-magnification * 2.0))))
         r.scale = 1.0
         applyOrbit()
     }
 
-    private func applyOrbit() {
+    var orbitDistance: Float {
+        get { distance }
+        set { distance = max(minDistance, min(maxDistance, newValue)); applyOrbit() }
+    }
+
+    func applyOrbit() {
         guard let cam = cameraNode else { return }
         let x = distance * cos(elevation) * sin(azimuth)
         let y = distance * sin(elevation)
         let z = distance * cos(elevation) * cos(azimuth)
-        cam.position = SCNVector3(Float(x), Float(y), Float(z))
-        cam.look(at: SCNVector3Zero)
+        cam.position = SCNVector3(orbitCenter.x + SCNFloat(x), orbitCenter.y + SCNFloat(y), orbitCenter.z + SCNFloat(z))
+        cam.look(at: orbitCenter)
     }
 }
 #else
 import AppKit
 typealias PlatformViewRepresentable = NSViewRepresentable
+typealias SCNFloat = CGFloat
 
 // Custom SCNView with manual orbit (left-drag) + logarithmic zoom (scroll/pinch).
-private class ZoomableSCNView: SCNView {
+class ZoomableSCNView: SCNView {
     weak var cameraNode: SCNNode?
+
+    /// Point the camera orbits around and looks at (moved per frame by views that follow a target).
+    var orbitCenter = SCNVector3Zero
+    var minDistance: Float = 5
+    var maxDistance: Float = 900
 
     private var azimuth:   Float = 0
     private var elevation: Float = -0.42
@@ -82,9 +99,9 @@ private class ZoomableSCNView: SCNView {
     func syncOrbit() {
         guard let cam = cameraNode else { return }
         let p = cam.position
-        let px = Float(p.x), py = Float(p.y), pz = Float(p.z)
+        let px = Float(p.x - orbitCenter.x), py = Float(p.y - orbitCenter.y), pz = Float(p.z - orbitCenter.z)
         let d = sqrt(px*px + py*py + pz*pz)
-        distance  = max(5, d)
+        distance  = max(minDistance, d)
         elevation = d > 0.001 ? asin(max(-1, min(1, py / d))) : 0
         azimuth   = atan2(px, pz)
     }
@@ -111,17 +128,22 @@ private class ZoomableSCNView: SCNView {
 
     private func applyZoom(factor: Double) {
         guard abs(factor - 1.0) > 0.0001 else { return }
-        distance = Float(max(5.0, min(900.0, Double(distance) * factor)))
+        distance = max(minDistance, min(maxDistance, Float(Double(distance) * factor)))
         applyOrbit()
     }
 
-    private func applyOrbit() {
+    var orbitDistance: Float {
+        get { distance }
+        set { distance = max(minDistance, min(maxDistance, newValue)); applyOrbit() }
+    }
+
+    func applyOrbit() {
         guard let cam = cameraNode else { return }
         let x = distance * cos(elevation) * sin(azimuth)
         let y = distance * sin(elevation)
         let z = distance * cos(elevation) * cos(azimuth)
-        cam.position = SCNVector3(CGFloat(x), CGFloat(y), CGFloat(z))
-        cam.look(at: SCNVector3Zero)
+        cam.position = SCNVector3(orbitCenter.x + SCNFloat(x), orbitCenter.y + SCNFloat(y), orbitCenter.z + SCNFloat(z))
+        cam.look(at: orbitCenter)
     }
 }
 #endif

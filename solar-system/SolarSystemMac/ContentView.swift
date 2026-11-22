@@ -5,38 +5,6 @@ private func makeDate(_ y: Int, _ m: Int, _ d: Int) -> Date {
         .date(from: DateComponents(year: y, month: m, day: d, hour: 12)) ?? Date()
 }
 
-// Swift's DateFormatter silently mangles year 0 and negative years.
-// These helpers use Calendar to extract year/month/day components and
-// apply astronomical-to-BC conversion: year 0 = 1 BC, -1 = 2 BC, etc.
-private let _months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-private var _utcGregorian: Calendar = {
-    var c = Calendar(identifier: .gregorian)
-    c.timeZone = TimeZone(identifier: "UTC")!
-    return c
-}()
-
-/// Full date: "Dec 21, 2020" / "May 27, 7 BC" / "Jun 21, 1405 BC"
-private func solarDateString(_ date: Date) -> String {
-    let c = _utcGregorian.dateComponents([.year, .month, .day], from: date)
-    guard let yr = c.year, let mo = c.month, let dy = c.day else { return "?" }
-    let ms = _months[max(0, min(11, mo - 1))]
-    if yr > 0 {
-        return yr <= 999 ? "\(ms) \(dy), \(yr) AD" : "\(ms) \(dy), \(yr)"
-    }
-    return "\(ms) \(dy), \(1 - yr) BC"
-}
-
-/// Short date (month + year only): "Dec 2020" / "May 7 BC"
-private func solarDateShort(_ date: Date) -> String {
-    let c = _utcGregorian.dateComponents([.year, .month], from: date)
-    guard let yr = c.year, let mo = c.month else { return "?" }
-    let ms = _months[max(0, min(11, mo - 1))]
-    if yr > 0 {
-        return yr <= 999 ? "\(ms) \(yr) AD" : "\(ms) \(yr)"
-    }
-    return "\(ms) \(1 - yr) BC"
-}
-
 private struct SpeedPreset: Identifiable, Hashable {
     let id: String
     let label: String
@@ -95,7 +63,7 @@ struct ContentView: View {
     @State private var showOrbits: Bool = true
     @State private var showAxes: Bool = false
     @State private var showLabels: Bool = true
-    @State private var showResonance: Bool = true
+    @State private var showResonance: Bool = false
     @State private var showStars: Bool = true
     @State private var observationMode: ObservationMode = .fullSystem
     @State private var clearCounter: Int = 0
@@ -104,6 +72,8 @@ struct ContentView: View {
     @State private var synth = ResonanceSynth()
     @State private var selectedDateInfo: NamedDate? = nil
     @State private var showTraditions: Bool = true
+    @State private var missionState = MissionState()
+    @State private var sandboxState = SandboxState()
 
     // Separate pair selection per mode so switching modes doesn't reset each other
     @State private var selectedSolarPair:  ResonancePair = .init(primary: "Earth",     secondary: "Venus",  ratioLabel: "13:8 ★")
@@ -194,9 +164,14 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 240, ideal: 270, max: 320)
         } detail: {
-            if observationMode == .earthMoonSystem {
+            if observationMode == .missions {
+                missionPane
+            } else if observationMode == .sandbox {
+                SandboxSceneView(state: sandboxState)
+            } else if observationMode == .earthMoonSystem {
                 TimelineView(.animation) { _ in
-                    EarthMoonView(simulationDate: simulationDate)
+                    EarthMoonView(simulationDate: simulationDate,
+                                  secondsPerSecond: isRunning ? timeScale : 0)
                 }
             } else if observationMode == .galactic {
                 TimelineView(.animation) { _ in
@@ -216,7 +191,7 @@ struct ContentView: View {
                         selectedBody: $selectedBody
                     )
                     .overlay(alignment: .top) {
-                        Text(solarDateString(simulationDate))
+                        Text(solarDateLabel(simulationDate, secondsPerSecond: isRunning ? timeScale : 0))
                             .font(.system(.body, design: .monospaced))
                             .padding(.horizontal, 14).padding(.vertical, 7)
                             .background(.ultraThinMaterial)
@@ -260,14 +235,6 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
-        .onChange(of: isRunning) { _, newValue in
-            if newValue {
-                playAnchorReal = Date()
-                playAnchorSim = selectedDate
-            } else {
-                selectedDate = simulationDate
-            }
-        }
         .onChange(of: selectedDate) { _, newValue in
             if isRunning {
                 playAnchorReal = Date()
@@ -286,11 +253,34 @@ struct ContentView: View {
         }
     }
 
-    private var simulationDate: Date {
-        guard isRunning else { return selectedDate }
-        let realElapsed = Date().timeIntervalSince(playAnchorReal)
-        return playAnchorSim.addingTimeInterval(realElapsed * timeScale)
+    /// Start or stop the clock. Always go through this (or `runBinding`): it re-anchors on
+    /// play and saves the reached date on pause *synchronously*, so a date set right after
+    /// (e.g. a mission parking at launch) isn't overwritten by a later onChange.
+    private func setRunning(_ on: Bool) {
+        guard on != isRunning else { return }
+        if on {
+            playAnchorReal = Date()
+            playAnchorSim = selectedDate
+        } else {
+            selectedDate = runningDate
+        }
+        isRunning = on
     }
+
+    private var runBinding: Binding<Bool> { Binding(get: { isRunning }, set: { setRunning($0) }) }
+
+    /// Where the running clock has reached, clamped to the end of the current mission.
+    private var runningDate: Date {
+        let d = playAnchorSim.addingTimeInterval(Date().timeIntervalSince(playAnchorReal) * timeScale)
+        if let end = missionEnd, d > end { return end }
+        return d
+    }
+
+    private var simulationDate: Date { isRunning ? runningDate : selectedDate }
+
+    /// End of the mission being shown (missions mode only); the clock stops there.
+    private var missionEnd: Date? { observationMode == .missions ? missionState.current?.end : nil }
+    private var missionEnded: Bool { isRunning && (missionEnd.map { runningDate >= $0 } ?? false) }
 
     private var activeSpeedPresets: [SpeedPreset] {
         switch observationMode {
@@ -453,12 +443,63 @@ struct ContentView: View {
         }
     }
 
-    private var controls: some View {
+
+    // MARK: - Sandbox
+
+    private var sandboxControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SandboxPlayButtons(state: sandboxState)
+            observationPicker
+            SandboxControls(state: sandboxState)
+        }
+    }
+
+    // MARK: - Missions
+
+    private var missionPane: some View {
+        TimelineView(.animation) { _ in
+            MissionSceneView(state: missionState, simulationDate: simulationDate,
+                             secondsPerSecond: isRunning ? timeScale : 0, cardBottomInset: 0)
+                .onChange(of: missionEnded) { _, ended in if ended { setRunning(false) } }
+        }
+    }
+
+    private var missionControls: some View {
+        TimelineView(.animation) { _ in
+            VStack(alignment: .leading, spacing: 14) {
+                MissionPlayButton(state: missionState, simulationDate: simulationDate,
+                                  isRunning: runBinding, onJump: { selectedDate = $0 })
+                observationPicker
+                MissionControls(state: missionState, simulationDate: simulationDate, isRunning: runBinding,
+                                onJump: { selectedDate = $0 }, onSpeed: { timeScale = $0 })
+            }
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
+        switch observationMode {
+        case .missions: missionControls
+        case .sandbox: sandboxControls
+        default: standardControls
+        }
+    }
+
+    private var observationPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("Observation")
+            Picker("", selection: $observationMode) {
+                ForEach(ObservationMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .labelsHidden()
+        }
+    }
+
+    private var standardControls: some View {
         VStack(alignment: .leading, spacing: 10) {
 
             // Playback
             HStack {
-                Button(isRunning ? "Pause" : "Run") { isRunning.toggle() }
+                Button(isRunning ? "Pause" : "Run") { setRunning(!isRunning) }
                     .buttonStyle(.borderedProminent)
                 if observationMode != .galactic {
                     Button("Clear") { clearCounter += 1 }
@@ -471,11 +512,7 @@ struct ContentView: View {
 
             Divider()
 
-            sectionLabel("Observation")
-            Picker("", selection: $observationMode) {
-                ForEach(ObservationMode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .labelsHidden()
+            observationPicker
 
             Divider()
 

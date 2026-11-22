@@ -666,17 +666,7 @@ final class EarthMoonScene {
     }
 
     private func buildMilkyWayBand(radius: CGFloat) {
-        for (pipe, alpha): (CGFloat, CGFloat) in [(radius * 0.055, 0.08), (radius * 0.018, 0.15)] {
-            let torus = SCNTorus(ringRadius: radius * 0.998, pipeRadius: pipe)
-            let mat   = SCNMaterial()
-            mat.diffuse.contents = NSColor(white: 1.0, alpha: alpha)
-            mat.isDoubleSided    = true
-            mat.lightingModel    = .constant
-            torus.materials = [mat]
-            let node = SCNNode(geometry: torus)
-            node.eulerAngles = SCNVector3(0, 0, CGFloat.pi / 3)
-            root.addChildNode(node)
-        }
+        root.addChildNode(MilkyWay.makeNode(radius: radius))
     }
 }
 
@@ -946,12 +936,13 @@ private struct MoonCard: View {
 
 struct EarthMoonView: View {
     let simulationDate: Date
+    var secondsPerSecond: Double = 0
 
     var body: some View {
         let data = EarthMoonData.compute(for: simulationDate)
         EarthMoonContainer(simulationDate: simulationDate)
             .overlay(alignment: .top) {
-                Text(simulationDate.formatted(date: .abbreviated, time: .omitted))
+                Text(solarDateLabel(simulationDate, secondsPerSecond: secondsPerSecond))
                     .font(.system(.body, design: .monospaced))
                     .padding(.horizontal, 14).padding(.vertical, 7)
                     .background(.ultraThinMaterial)

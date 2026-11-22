@@ -46,7 +46,7 @@ struct ContentView: View {
     @State private var showOrbits: Bool = true
     @State private var showAxes: Bool = false
     @State private var showLabels: Bool = true
-    @State private var showResonance: Bool = true
+    @State private var showResonance: Bool = false
     @State private var showStars: Bool = true
     @State private var observationMode: ObservationMode = .fullSystem
     @State private var clearCounter: Int = 0
@@ -55,6 +55,8 @@ struct ContentView: View {
     @State private var synth = ResonanceSynth()
     @State private var selectedDateInfo: NamedDate? = nil
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var missionState = MissionState()
+    @State private var sandboxState = SandboxState()
 
     // Phone bottom sheet: collapsed height shows just the Run/Clear row.
     private let compactSheetPeek: PresentationDetent = .height(90)
@@ -178,14 +180,6 @@ struct ContentView: View {
         // an alert while its sheet is up); elsewhere it lives here.
         .bookmarkAlert(isPresented: sizeClass == .regular ? $showingBookmarkAlert : .constant(false),
                        name: $bookmarkName, onSave: saveBookmark)
-        .onChange(of: isRunning) { _, newValue in
-            if newValue {
-                playAnchorReal = Date()
-                playAnchorSim = selectedDate
-            } else {
-                selectedDate = simulationDate
-            }
-        }
         .onChange(of: selectedDate) { _, newValue in
             if isRunning {
                 playAnchorReal = Date()
@@ -206,7 +200,15 @@ struct ContentView: View {
 
     // MARK: - Scene Pane
 
-    private var scenePane: some View {
+    @ViewBuilder private var scenePane: some View {
+        switch observationMode {
+        case .missions: missionPane
+        case .sandbox: SandboxSceneView(state: sandboxState, cardBottomInset: cardBottomInset)
+        default: solarPane
+        }
+    }
+
+    private var solarPane: some View {
         TimelineView(.animation) { _ in
             SolarSystemSceneView(
                 simulationDate: simulationDate,
@@ -220,7 +222,7 @@ struct ContentView: View {
                 selectedBody: $selectedBody
             )
             .overlay(alignment: .top) {
-                Text(simulationDate.formatted(date: .abbreviated, time: .omitted))
+                Text(solarDateLabel(simulationDate, secondsPerSecond: isRunning ? timeScale : 0))
                     .font(.system(sizeClass == .regular ? .title2 : .body, design: .monospaced))
                     .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(.ultraThinMaterial)
@@ -253,11 +255,34 @@ struct ContentView: View {
 
     // MARK: - Simulation Time
 
-    private var simulationDate: Date {
-        guard isRunning else { return selectedDate }
-        let realElapsed = Date().timeIntervalSince(playAnchorReal)
-        return playAnchorSim.addingTimeInterval(realElapsed * timeScale)
+    /// Start or stop the clock. Always go through this (or `runBinding`): it re-anchors on
+    /// play and saves the reached date on pause *synchronously*, so a date set right after
+    /// (e.g. a mission parking at launch) isn't overwritten by a later onChange.
+    private func setRunning(_ on: Bool) {
+        guard on != isRunning else { return }
+        if on {
+            playAnchorReal = Date()
+            playAnchorSim = selectedDate
+        } else {
+            selectedDate = runningDate
+        }
+        isRunning = on
     }
+
+    private var runBinding: Binding<Bool> { Binding(get: { isRunning }, set: { setRunning($0) }) }
+
+    /// Where the running clock has reached, clamped to the end of the current mission.
+    private var runningDate: Date {
+        let d = playAnchorSim.addingTimeInterval(Date().timeIntervalSince(playAnchorReal) * timeScale)
+        if let end = missionEnd, d > end { return end }
+        return d
+    }
+
+    private var simulationDate: Date { isRunning ? runningDate : selectedDate }
+
+    /// End of the mission being shown (missions mode only); the clock stops there.
+    private var missionEnd: Date? { observationMode == .missions ? missionState.current?.end : nil }
+    private var missionEnded: Bool { isRunning && (missionEnd.map { runningDate >= $0 } ?? false) }
 
     private var activeSpeedPresets: [SpeedPreset] {
         switch observationMode {
@@ -417,10 +442,65 @@ struct ContentView: View {
 
     // MARK: - Controls
 
-    private var controls: some View {
+
+    // MARK: - Sandbox
+
+    private var sandboxControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SandboxPlayButtons(state: sandboxState)
+            observationPicker
+            SandboxControls(state: sandboxState)
+        }
+    }
+
+    // MARK: - Missions
+
+    private var missionPane: some View {
+        TimelineView(.animation) { _ in
+            MissionSceneView(state: missionState, simulationDate: simulationDate,
+                             secondsPerSecond: isRunning ? timeScale : 0, cardBottomInset: cardBottomInset)
+                .onChange(of: missionEnded) { _, ended in if ended { setRunning(false) } }
+        }
+    }
+
+    private var missionControls: some View {
+        TimelineView(.animation) { _ in
+            VStack(alignment: .leading, spacing: 14) {
+                MissionPlayButton(state: missionState, simulationDate: simulationDate,
+                                  isRunning: runBinding, onJump: { selectedDate = $0 })
+                observationPicker
+                MissionControls(state: missionState, simulationDate: simulationDate, isRunning: runBinding,
+                                onJump: { selectedDate = $0 }, onSpeed: { timeScale = $0 })
+            }
+        }
+    }
+
+    @ViewBuilder private var controls: some View {
+        switch observationMode {
+        case .missions: missionControls
+        case .sandbox: sandboxControls
+        default: standardControls
+        }
+    }
+
+    /// Mode picker. Earth & Moon and Galactic are Mac-only views, so they're hidden here.
+    private var observationPicker: some View {
+        HStack {
+            sectionLabel("Observation")
+            Spacer()
+            Picker("Observation Mode", selection: $observationMode) {
+                ForEach(ObservationMode.allCases.filter { $0 != .earthMoonSystem && $0 != .galactic }) {
+                    Text($0.rawValue).tag($0)
+                }
+            }
+            .pickerStyle(.menu)
+        }
+    }
+
+    private var standardControls: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Button(isRunning ? "Pause" : "Run") { isRunning.toggle() }
+                Button(isRunning ? "Pause" : "Run") { setRunning(!isRunning) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(sizeClass == .regular ? .large : .regular)
                 Button("Clear") { clearCounter += 1 }
@@ -428,13 +508,7 @@ struct ContentView: View {
                 Spacer()
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                sectionLabel("Observation")
-                Picker("Observation Mode", selection: $observationMode) {
-                    ForEach(ObservationMode.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-            }
+            observationPicker
 
             VStack(alignment: .leading, spacing: 8) {
                 sectionLabel("Run Speed")

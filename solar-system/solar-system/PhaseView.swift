@@ -1,8 +1,8 @@
 import SwiftUI
 
 // Lissajous phase diagram: plots the primary body's orbital angle (x-axis)
-// against the secondary body's orbital angle (y-axis) over the last two
-// orbits of whichever body has the longer period.
+// against the secondary body's orbital angle (y-axis) over one full
+// resonance cycle (derived from the ratio label).
 //
 // A true resonance (2:1, 4:1, 13:8 …) traces a closed figure.
 // A near-resonance drifts slowly, making the imperfect locking visible.

@@ -1,14 +1,5 @@
 import SwiftUI
 
-// MARK: - Named Date
-
-struct NamedDate: Identifiable, Codable, Hashable {
-    let id: UUID
-    let name: String
-    let date: Date
-    init(name: String, date: Date) { id = UUID(); self.name = name; self.date = date }
-}
-
 private func makeDate(_ y: Int, _ m: Int, _ d: Int) -> Date {
     Calendar(identifier: .gregorian)
         .date(from: DateComponents(year: y, month: m, day: d, hour: 12)) ?? Date()

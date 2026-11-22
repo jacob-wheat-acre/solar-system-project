@@ -57,6 +57,8 @@
 		16EAF11B2F2717B300041738 /* Exceptions for "solar-system" folder in "SolarSystemMac" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				NamedDate.swift,
+				PhaseView.swift,
 				SolarSystemScene.swift,
 				SolarSystemSceneView.swift,
 			);

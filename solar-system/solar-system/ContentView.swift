@@ -1,14 +1,5 @@
 import SwiftUI
 
-// MARK: - Named Date
-
-struct NamedDate: Identifiable, Codable, Hashable {
-    let id: UUID
-    let name: String
-    let date: Date
-    init(name: String, date: Date) { id = UUID(); self.name = name; self.date = date }
-}
-
 private func makeDate(_ y: Int, _ m: Int, _ d: Int) -> Date {
     Calendar(identifier: .gregorian)
         .date(from: DateComponents(year: y, month: m, day: d, hour: 12)) ?? Date()
@@ -64,6 +55,10 @@ struct ContentView: View {
     @State private var synth = ResonanceSynth()
     @State private var selectedDateInfo: NamedDate? = nil
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    // Phone bottom sheet: collapsed height shows just the Run/Clear row.
+    private let compactSheetPeek: PresentationDetent = .height(90)
+    @State private var compactSheetDetent: PresentationDetent = .height(90)
 
     // Separate pair selection per mode so switching modes doesn't reset each other
     @State private var selectedSolarPair:   ResonancePair = .init(primary: "Earth",     secondary: "Venus",   ratioLabel: "13:8 ★")
@@ -153,15 +148,24 @@ struct ContentView: View {
                         .ignoresSafeArea()
                 }
             } else {
-                VStack(spacing: 0) {
-                    scenePane
-                        .frame(minHeight: 340)
-                    Divider()
-                    ScrollView {
-                        controls
-                            .padding()
+                // Phone: full-screen scene with the controls in a non-dismissable
+                // bottom sheet. Background interaction stays enabled up to the
+                // medium detent so the scene remains tappable/draggable.
+                scenePane
+                    .ignoresSafeArea()
+                    .sheet(isPresented: .constant(true)) {
+                        ScrollView {
+                            controls
+                                .padding()
+                        }
+                        .bookmarkAlert(isPresented: $showingBookmarkAlert,
+                                       name: $bookmarkName, onSave: saveBookmark)
+                        .presentationDetents([compactSheetPeek, .medium, .large],
+                                             selection: $compactSheetDetent)
+                        .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                        .presentationDragIndicator(.visible)
+                        .interactiveDismissDisabled()
                     }
-                }
             }
         }
         .onAppear {
@@ -170,17 +174,10 @@ struct ContentView: View {
             loadSaved()
         }
         .onChange(of: observationMode) { _, _ in selectedBody = nil }
-        .alert("Name this bookmark", isPresented: $showingBookmarkAlert) {
-            TextField("Name", text: $bookmarkName)
-            Button("Save") {
-                let name = bookmarkName.isEmpty
-                    ? simulationDate.formatted(date: .abbreviated, time: .omitted)
-                    : bookmarkName
-                savedDates.append(NamedDate(name: name, date: simulationDate))
-                persistSaved()
-            }
-            Button("Cancel", role: .cancel) { }
-        }
+        // On phone the alert lives on the sheet (a presenting view can't show
+        // an alert while its sheet is up); elsewhere it lives here.
+        .bookmarkAlert(isPresented: sizeClass == .regular ? $showingBookmarkAlert : .constant(false),
+                       name: $bookmarkName, onSave: saveBookmark)
         .onChange(of: isRunning) { _, newValue in
             if newValue {
                 playAnchorReal = Date()
@@ -236,6 +233,7 @@ struct ContentView: View {
                 BodyInfoCard(name: body) { selectedBody = nil }
                     .id(body)
                     .padding(12)
+                    .padding(.bottom, cardBottomInset)
                     .transition(.opacity)
             }
         }
@@ -244,10 +242,14 @@ struct ContentView: View {
                 DateInfoCard(entry: d) { selectedDateInfo = nil }
                     .id(d.id)
                     .padding(12)
+                    .padding(.bottom, cardBottomInset)
                     .transition(.opacity)
             }
         }
     }
+
+    /// Keeps info cards above the collapsed phone sheet.
+    private var cardBottomInset: CGFloat { sizeClass == .regular ? 0 : 100 }
 
     // MARK: - Simulation Time
 
@@ -349,6 +351,14 @@ struct ContentView: View {
         case .saturnSystem: $selectedSaturnPair
         default:            $selectedSolarPair
         }
+    }
+
+    private func saveBookmark() {
+        let name = bookmarkName.isEmpty
+            ? simulationDate.formatted(date: .abbreviated, time: .omitted)
+            : bookmarkName
+        savedDates.append(NamedDate(name: name, date: simulationDate))
+        persistSaved()
     }
 
     private func loadSaved() {
@@ -567,5 +577,16 @@ struct ContentView: View {
 
     private func sectionLabel(_ title: String) -> some View {
         Text(title).font(.subheadline).foregroundStyle(.secondary)
+    }
+}
+
+private extension View {
+    func bookmarkAlert(isPresented: Binding<Bool>, name: Binding<String>,
+                       onSave: @escaping () -> Void) -> some View {
+        alert("Name this bookmark", isPresented: isPresented) {
+            TextField("Name", text: name)
+            Button("Save", action: onSave)
+            Button("Cancel", role: .cancel) { }
+        }
     }
 }

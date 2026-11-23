@@ -36,6 +36,7 @@ Run these from the repo root:
 
 ```sh
 python3 tools/fetch_missions.py [apollo11 voyager cassini newhorizons]   # regenerate mission data (needs network)
+python3 tools/fetch_stars.py                                               # regenerate the Star Map catalogue (needs network)
 python3 tools/make_icon.py <out-dir>                                       # regenerate app icon PNGs
 ```
 
@@ -92,5 +93,9 @@ The iOS `ContentView` has two layouts:
     - Building needs the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
   - **Fling mode:** the scope button next to Play/Reset. While it's on, `ZoomableSCNView.flingHandler` takes one-finger/left drags, and the camera orbits with two fingers, right-drag or ⌥-drag. The throw is relative to `SandboxSimulation.dominantBody(at:)` (the smallest Hill sphere containing the start), and dragging out to that body's distance gives circular speed. `predictPath` runs a scratch copy of the sim for the preview, and `add(_:)` inserts the body mid-run, moving the energy-drift baseline. Flung bodies are live only: Reset removes them.
   - The physics is roughly 80× slower in Debug, so install a Release build on a device.
+- **Star Map mode** (`ObservationMode.starMap`, both apps): every catalogued star within 50 ly, in galactic coordinates (1 ly = 1 unit, galactic centre toward +x).
+  - Data: `StarData/nearby_stars.json`, built by `python3 tools/fetch_stars.py` from the HYG database v4.1 (CC BY-SA 4.0, credited in the info card). Planet notes and the hand-added stars missing from HYG (TRAPPIST-1, Teegarden's Star) live in the script.
+  - `StarMapModel.swift` (`NearbyStar`, `StarCatalog`, the equatorial→galactic matrix), `StarTravel.swift` (`StarTrip`: cruise, constant-g thrust with hyperbolic motion, speculative warp), `StarMapScene.swift`, and `StarMapView.swift` (`StarMapState`, which has its own trip clock like Sandbox).
+  - "Open in Sandbox" uses `NearbyStar.sandbox` (a `SandboxScenarios` id), wired through `StarMapState.openSandbox` in each `ContentView`.
 - **Galactic view (Mac):** `GalacticModel` (in `GalacticView.swift`) holds the measured numbers, with sources in comments: the Sun's orbit and bob, Reid et al. 2019 arm positions (trailing, 12° pitch), and the bar's length, angle and pattern speed. The bob is drawn 4× taller.
 - **Mac-only scenes:** `EarthMoonScene` and `GalacticScene` follow the same pattern: a scene class with `update(...)`, an `NSViewRepresentable` container whose coordinator holds the scene, and a custom `SCNView` subclass for orbit, zoom, and tap handling.

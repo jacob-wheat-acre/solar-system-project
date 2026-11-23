@@ -79,6 +79,11 @@
 				SharedSceneUI.swift,
 				SolarSystemScene.swift,
 				SolarSystemSceneView.swift,
+				"StarData/nearby_stars.json",
+				StarMapModel.swift,
+				StarMapScene.swift,
+				StarMapView.swift,
+				StarTravel.swift,
 			);
 			target = 16EAF0F22F27163400041738 /* SolarSystemMac */;
 		};

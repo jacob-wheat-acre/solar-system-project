@@ -74,6 +74,7 @@ struct ContentView: View {
     @State private var showTraditions: Bool = true
     @State private var missionState = MissionState()
     @State private var sandboxState = SandboxState()
+    @State private var starMapState = StarMapState()
 
     // Separate pair selection per mode so switching modes doesn't reset each other
     @State private var selectedSolarPair:  ResonancePair = .init(primary: "Earth",     secondary: "Venus",  ratioLabel: "13:8 ★")
@@ -168,6 +169,8 @@ struct ContentView: View {
                 missionPane
             } else if observationMode == .sandbox {
                 SandboxSceneView(state: sandboxState)
+            } else if observationMode == .starMap {
+                StarMapSceneView(state: starMapState)
             } else if observationMode == .earthMoonSystem {
                 TimelineView(.animation) { _ in
                     EarthMoonView(simulationDate: simulationDate,
@@ -458,6 +461,22 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Star Map
+
+    private var starMapControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            StarMapPlayButtons(state: starMapState)
+            observationPicker
+            StarMapControls(state: starMapState)
+        }
+        .onAppear {
+            starMapState.openSandbox = { id in
+                observationMode = .sandbox
+                sandboxState.select(id)
+            }
+        }
+    }
+
     // MARK: - Missions
 
     private var missionPane: some View {
@@ -484,6 +503,7 @@ struct ContentView: View {
         switch observationMode {
         case .missions: missionControls
         case .sandbox: sandboxControls
+        case .starMap: starMapControls
         default: standardControls
         }
     }

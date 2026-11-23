@@ -57,6 +57,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var missionState = MissionState()
     @State private var sandboxState = SandboxState()
+    @State private var starMapState = StarMapState()
 
     // Phone bottom sheet: collapsed height shows just the Run/Clear row.
     private let compactSheetPeek: PresentationDetent = .height(90)
@@ -204,6 +205,7 @@ struct ContentView: View {
         switch observationMode {
         case .missions: missionPane
         case .sandbox: SandboxSceneView(state: sandboxState, cardBottomInset: cardBottomInset)
+        case .starMap: StarMapSceneView(state: starMapState, cardBottomInset: cardBottomInset)
         default: solarPane
         }
     }
@@ -457,6 +459,22 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Star Map
+
+    private var starMapControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            StarMapPlayButtons(state: starMapState)
+            observationPicker
+            StarMapControls(state: starMapState)
+        }
+        .onAppear {
+            starMapState.openSandbox = { id in
+                observationMode = .sandbox
+                sandboxState.select(id)
+            }
+        }
+    }
+
     // MARK: - Missions
 
     private var missionPane: some View {
@@ -483,6 +501,7 @@ struct ContentView: View {
         switch observationMode {
         case .missions: missionControls
         case .sandbox: sandboxControls
+        case .starMap: starMapControls
         default: standardControls
         }
     }

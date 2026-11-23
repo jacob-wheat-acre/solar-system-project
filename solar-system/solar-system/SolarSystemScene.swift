@@ -16,6 +16,7 @@ enum ObservationMode: String, CaseIterable, Identifiable {
     case galactic        = "Galactic Journey"
     case missions        = "Missions"
     case sandbox         = "Sandbox"
+    case starMap         = "Star Map"
 
     var id: String { rawValue }
 }
@@ -642,7 +643,7 @@ final class SolarSystemScene {
         cameraNode.camera?.fieldOfView = 60
 
         switch currentObservationMode {
-        case .fullSystem, .earthMoonSystem, .galactic, .missions, .sandbox:
+        case .fullSystem, .earthMoonSystem, .galactic, .missions, .sandbox, .starMap:
             cameraNode.position    = SCNVector3(0, 120, 260)
             cameraNode.eulerAngles = SCNVector3(-0.42, 0, 0)
         case .topDown:

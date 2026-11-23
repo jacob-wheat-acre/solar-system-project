@@ -29,7 +29,7 @@ nonisolated enum SandboxUnits {
     static func kmPerSecond(_ auPerYear: Double) -> Double { auPerYear * auKm / yearSeconds }
 }
 
-nonisolated enum SandboxBodyKind: String, Sendable {
+nonisolated enum SandboxBodyKind: String, Codable, Hashable, Sendable {
     case star, planet, moon, neutronStar, blackHole
 }
 
@@ -45,7 +45,7 @@ nonisolated struct SandboxBody: Identifiable, Sendable {
     var properTime: Double = 0       // years experienced by this body's clock
 }
 
-nonisolated struct SandboxOptions: Sendable, Equatable {
+nonisolated struct SandboxOptions: Codable, Hashable, Sendable {
     var relativity = true
     var gravitationalWaves = false
     var cScale = 1.0

@@ -30,7 +30,7 @@ xcodebuild -scheme solar-system -destination 'platform=iOS Simulator,name=<devic
 xcodebuild -scheme SolarSystemMac -destination 'platform=macOS' test -only-testing:SolarSystemMacTests/MissionDataTests/missionLoads
 ```
 
-Real tests live in `SolarSystemMacTests/SolarSystemMacTests.swift` (mission data, interpolation, date labels) and `SolarSystemMacTests/SandboxPhysicsTests.swift` (physics against measured values; slow in Debug, so add `-configuration Release ENABLE_TESTABILITY=YES` for a fast run). The iOS test targets and the UI tests are still template stubs. No linter is configured.
+Real tests live in `SolarSystemMacTests/SolarSystemMacTests.swift` (mission data, interpolation, date labels), `SolarSystemMacTests/SandboxPhysicsTests.swift` (physics against measured values) and `SandboxDesignTests.swift` (system builder). The sandbox tests are slow in Debug, so add `-configuration Release ENABLE_TESTABILITY=YES` for a fast run. The iOS test targets and the UI tests are still template stubs. No linter is configured.
 
 Run these from the repo root:
 
@@ -51,6 +51,7 @@ The project uses Xcode 16 **file-system synchronized groups**, so any file place
 - `solar-system/solar-system/DateDisplay.swift`: `solarDateString` / `solarDateShort` / `solarDateLabel` (BC-aware; the label's precision drops as playback speeds up)
 - `solar-system/solar-system/Mission*.swift` and `MissionData/*.json`: the Missions view (see below). Each JSON file is listed in `membershipExceptions` individually.
 - `solar-system/solar-system/Sandbox*.swift`: the Sandbox mode (see below)
+- `solar-system/solar-system/BlackHoleLens.metal`: the black-hole lens shader (listed in `membershipExceptions` like the Swift files)
 - `solar-system/solar-system/SharedSceneUI.swift`: `SceneLines` (line geometry), `CelestialSky` (camera-following star sphere) and `LabelOverlay` (SpriteKit name labels), used by Missions and Sandbox
 
 Editing any of these files affects **both** apps, so build both schemes afterward. These files handle platform differences with `#if os(iOS)` / `#if os(macOS)` and with the type aliases `NSColorLike` (UIColor/NSColor), `PlatformViewRepresentable`, `SceneFloat` (file-private to `SolarSystemScene.swift`) and `SCNFloat` (Float on iOS, CGFloat on macOS; defined in `SolarSystemSceneView.swift`). Use these aliases instead of platform types. `ZoomableSCNView` (also in `SolarSystemSceneView.swift`) is the shared orbit/zoom camera view; set `orbitCenter` each frame to follow a moving target.
@@ -77,5 +78,18 @@ The iOS `ContentView` has two layouts:
   - `SandboxPhysics.swift`: units are AU, years and M☉ (G = 4π²). Newtonian gravity plus optional 1PN (Einstein–Infeld–Hoffmann) and 2.5PN radiation reaction, with an adjustable speed of light (`cScale`). Adaptive Dormand–Prince RK45, because the forces depend on velocity. Also handles collisions/mergers, black-hole absorption, collapse, proper-time clocks, the `PrecessionTracker`, and trails sampled inside the integrator.
   - `SandboxScenarios.swift`: the presets. Several are real systems with measured relativistic effects, and the tests check against them (Mercury 43″/century, S2 12′/orbit, Hulse–Taylor 4.23°/yr and its Peters–Mathews orbital decay).
   - `SandboxScene.swift`: the scene plus `GravityGrid`, the potential "rubber sheet" with depth linear in potential and drop lines from each body.
+  - **System builder:** every system is a `SandboxDesign` (in `SandboxDesign.swift`), including the presets.
+    - Each body has a parent and orbital elements; `parent == nil` means it orbits the centre of mass of everything before it in tree order.
+    - `build()` turns a design into barycentric starting states.
+    - Saved designs are stored as JSON in `UserDefaults` under `"sandboxDesigns"`.
+    - `SandboxEditor.swift` edits the starting setup: the sim stays paused at t = 0 and is rebuilt on every change. `finishEditing()` refits the view via `SandboxAutoView`.
+    - `SandboxAnalysis.swift` holds the physics checks (habitable zone, Hill sphere, Roche limit, Gladman spacing, Holman–Wiegert binary limits, ISCO). They're pure functions, tested in `SandboxDesignTests`.
+  - **Ray-traced black holes:** `BlackHoleLens.metal` is a full-screen `SCNTechnique` pass, set on the Sandbox view only while the system has a black hole (`SandboxLens.swift` builds it and the sky texture).
+    - Per pixel it integrates the photon orbit u'' + u = 3/2 u², then samples the rendered scene or an equirectangular copy of `CelestialSky`. That gives the shadow, Einstein rings and the optional accretion disk.
+    - `SchwarzschildRay` is the same maths in Swift, for tests.
+    - SceneKit doesn't give technique quad passes its frame matrices (`scn_frame` reads as zeros), so camera values are computed on the CPU. Each is passed as a `vec4` symbol, bound to a same-named field of the shader's struct.
+    - Passing an `NSData` for a `vec4` symbol throws inside SceneKit and deadlocks the app.
+    - Building needs the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`).
   - The physics is roughly 80× slower in Debug, so install a Release build on a device.
+- **Galactic view (Mac):** `GalacticModel` (in `GalacticView.swift`) holds the measured numbers, with sources in comments: the Sun's orbit and bob, Reid et al. 2019 arm positions (trailing, 12° pitch), and the bar's length, angle and pattern speed. The bob is drawn 4× taller.
 - **Mac-only scenes:** `EarthMoonScene` and `GalacticScene` follow the same pattern: a scene class with `update(...)`, an `NSViewRepresentable` container whose coordinator holds the scene, and a custom `SCNView` subclass for orbit, zoom, and tap handling.

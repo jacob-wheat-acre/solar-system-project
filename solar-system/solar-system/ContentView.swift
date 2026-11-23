@@ -447,9 +447,13 @@ struct ContentView: View {
 
     private var sandboxControls: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SandboxPlayButtons(state: sandboxState)
-            observationPicker
-            SandboxControls(state: sandboxState)
+            if sandboxState.isEditing {
+                SandboxEditor(state: sandboxState)
+            } else {
+                SandboxPlayButtons(state: sandboxState)
+                observationPicker
+                SandboxControls(state: sandboxState)
+            }
         }
     }
 

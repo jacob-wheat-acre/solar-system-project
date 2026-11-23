@@ -13,8 +13,8 @@ nonisolated struct SandboxScenario: Identifiable, Sendable {
     let id: String
     let name: String
     let blurb: String
+    let design: SandboxDesign
     let bodies: [SandboxBody]
-    let options: SandboxOptions
     let sceneUnitsPerAU: Double
     let speeds: [SandboxSpeed]
     let defaultSpeed: Int
@@ -24,49 +24,55 @@ nonisolated struct SandboxScenario: Identifiable, Sendable {
     let tracker: (body: Int, primary: Int)?
     /// Text shown next to the precession meter.
     let precessionNote: String?
+    var options: SandboxOptions { design.options }
+    var isPreset: Bool { design.presetID == id }
+
+    init(id: String, name: String, blurb: String, design: SandboxDesign, sceneUnitsPerAU: Double,
+         speeds: [SandboxSpeed], defaultSpeed: Int, follow: Int, cameraDistance: Float, gridHalfSizeAU: Double,
+         tracker: (body: Int, primary: Int)?, precessionNote: String?) {
+        self.id = id; self.name = name; self.blurb = blurb; self.design = design
+        self.bodies = design.build().bodies
+        self.sceneUnitsPerAU = sceneUnitsPerAU; self.speeds = speeds; self.defaultSpeed = defaultSpeed
+        self.follow = follow; self.cameraDistance = cameraDistance; self.gridHalfSizeAU = gridHalfSizeAU
+        self.tracker = tracker; self.precessionNote = precessionNote
+    }
+
+    /// A user's own system, with view settings fitted to it.
+    static func custom(_ d: SandboxDesign) -> SandboxScenario {
+        let v = SandboxAutoView.settings(for: d)
+        return SandboxScenario(id: customID(d.id), name: d.name, blurb: "", design: d,
+                               sceneUnitsPerAU: v.sceneUnitsPerAU, speeds: v.speeds, defaultSpeed: v.defaultSpeed,
+                               follow: d.bodies.first?.id ?? 0, cameraDistance: v.cameraDistance,
+                               gridHalfSizeAU: v.gridHalfSizeAU, tracker: nil, precessionNote: nil)
+    }
+
+    static func customID(_ id: UUID) -> String { "custom:\(id.uuidString)" }
 }
 
 nonisolated enum SandboxScenarios {
-    static var all: [SandboxScenario] { [solarSystem, sagittariusA, hulseTaylor, neutronStarMerger, alphaCentauri, trappist1] }
-    static func scenario(_ id: String) -> SandboxScenario { all.first { $0.id == id } ?? all[0] }
+    static var all: [SandboxScenario] { [solarSystem, sagittariusA, blackHoleCloseUp, hulseTaylor, neutronStarMerger, alphaCentauri, trappist1] }
+    static func preset(_ id: String) -> SandboxScenario? { all.first { $0.id == id } }
+    static func scenario(_ id: String) -> SandboxScenario { preset(id) ?? all[0] }
 
     private static let hour = 1 / (365.25 * 24), day = 1 / 365.25
 
     private static func color(_ r: Float, _ g: Float, _ b: Float) -> SIMD3<Float> { SIMD3(r, g, b) }
 
-    /// Builds a system: add bodies relative to a parent, then shift to the barycentre.
+    /// Collects design bodies; ids are list positions, as in the original presets.
     private struct Builder {
-        var bodies: [SandboxBody] = []
+        var bodies: [DesignBody] = []
         mutating func add(_ name: String, _ kind: SandboxBodyKind, mass: Double, radius: Double,
-                          color: SIMD3<Float>, around parent: Int? = nil, aroundAll: Bool = false,
+                          color: SIMD3<Float>, around parent: Int? = nil,
                           a: Double = 0, e: Double = 0, i: Double = 0, node: Double = 0,
                           argPeri: Double = 0, meanAnomaly: Double = 0) -> Int {
-            var p = SIMD3<Double>.zero, v = SIMD3<Double>.zero
-            // Orbit one parent body, or (aroundAll) the barycentre of everything so far.
-            var centre: (m: Double, p: SIMD3<Double>, v: SIMD3<Double>)?
-            if let parent { centre = (bodies[parent].mass, bodies[parent].position, bodies[parent].velocity) }
-            if aroundAll {
-                var m = 0.0, cp = SIMD3<Double>.zero, cv = SIMD3<Double>.zero
-                for b in bodies { m += b.mass; cp += b.mass * b.position; cv += b.mass * b.velocity }
-                centre = (m, cp / m, cv / m)
-            }
-            if let centre {
-                let (r, vel) = Kepler.state(totalMass: centre.m + mass, a: a, e: e, i: i, node: node,
-                                            argPeri: argPeri, meanAnomaly: meanAnomaly)
-                p = centre.p + r; v = centre.v + vel
-            }
             let id = bodies.count
-            bodies.append(SandboxBody(id: id, name: name, kind: kind, mass: mass, radius: radius,
-                                      position: p, velocity: v, color: color))
+            bodies.append(DesignBody(id: id, name: name, kind: kind, mass: mass, radius: radius, autoRadius: false,
+                                     color: color, parent: parent, a: a, e: e, i: i, node: node,
+                                     argPeri: argPeri, meanAnomaly: meanAnomaly))
             return id
         }
-        func centred() -> [SandboxBody] {
-            var m = 0.0, com = SIMD3<Double>.zero, vcom = SIMD3<Double>.zero
-            for b in bodies { m += b.mass; com += b.mass * b.position; vcom += b.mass * b.velocity }
-            com /= m; vcom /= m
-            var out = bodies
-            for i in out.indices { out[i].position -= com; out[i].velocity -= vcom }
-            return out
+        func design(_ id: String, _ name: String, _ options: SandboxOptions = SandboxOptions()) -> SandboxDesign {
+            SandboxDesign(name: name, bodies: bodies, options: options, presetID: id)
         }
     }
 
@@ -93,7 +99,7 @@ nonisolated enum SandboxScenarios {
         return SandboxScenario(
             id: "solar", name: "Our Solar System",
             blurb: "The real planets, now pulling on each other. Mercury's orbit slowly turns: about 532″ per century from the other planets, plus 43″ that only general relativity explains. Turn the speed of light down to exaggerate it.",
-            bodies: s.centred(), options: SandboxOptions(), sceneUnitsPerAU: 10,
+            design: s.design("solar", "Our Solar System"), sceneUnitsPerAU: 10,
             speeds: [.init(label: "0.1 y/s", yearsPerSecond: 0.1), .init(label: "1 y/s", yearsPerSecond: 1),
                      .init(label: "10 y/s", yearsPerSecond: 10), .init(label: "50 y/s", yearsPerSecond: 50)],
             defaultSpeed: 1, follow: 0, cameraDistance: 80, gridHalfSizeAU: 12,
@@ -116,16 +122,37 @@ nonisolated enum SandboxScenarios {
         return SandboxScenario(
             id: "sgra", name: "S2 and Sagittarius A*",
             blurb: "Stars orbiting the 4.3-million-solar-mass black hole at the centre of our galaxy. S2's orbit turns by about 12′ each 16-year lap: measured by the GRAVITY telescope in 2020, matching Einstein.",
-            bodies: s.centred(), options: SandboxOptions(), sceneUnitsPerAU: 0.02,
+            design: s.design("sgra", "S2 and Sagittarius A*"), sceneUnitsPerAU: 0.02,
             speeds: [.init(label: "1 y/s", yearsPerSecond: 1), .init(label: "4 y/s", yearsPerSecond: 4),
                      .init(label: "16 y/s", yearsPerSecond: 16)],
             defaultSpeed: 1, follow: 0, cameraDistance: 70, gridHalfSizeAU: 2200,
             tracker: (1, 0), precessionNote: "S2 · Einstein: ≈ 12′ per orbit")
     }
 
+    // MARK: Black hole close-up
+
+    static var blackHoleCloseUp: SandboxScenario {
+        var s = Builder()
+        // 10⁶ M☉: r_s ≈ 0.02 AU (3 million km), so the shadow is big enough to see up close.
+        let bh = s.add("Black hole", .blackHole, mass: 1e6, radius: 0, color: color(0, 0, 0))
+        // Outside its Roche limit (~1.1 AU for a Sun-like star) so it isn't torn apart.
+        _ = s.add("Star", .star, mass: 1, radius: SandboxUnits.sunRadius, color: color(1, 0.93, 0.8),
+                  around: bh, a: 3, e: 0.3, i: 8)
+        return SandboxScenario(
+            id: "bh-closeup", name: "Black hole close-up",
+            blurb: "A million-solar-mass black hole, ray traced. The black shadow is 2.6 times the event horizon: light passing any closer falls in. Starlight from behind is bent into rings around it. A star orbits every two days, its orbit turning by about 4° a lap from relativity.",
+            design: s.design("bh-closeup", "Black hole close-up"), sceneUnitsPerAU: 10,
+            speeds: [.init(label: "1 h/s", yearsPerSecond: hour), .init(label: "6 h/s", yearsPerSecond: 6 * hour),
+                     .init(label: "1 d/s", yearsPerSecond: day)],
+            defaultSpeed: 1, follow: 0, cameraDistance: 9, gridHalfSizeAU: 5,
+            tracker: (1, 0), precessionNote: "Star · Einstein: ≈ 3.9° per orbit")
+    }
+
     // MARK: Hulse–Taylor binary pulsar
 
-    private static func hulseTaylorBodies(cScale: Double, a overrideA: Double? = nil, e: Double = 0.6171334) -> [SandboxBody] {
+    private static func hulseTaylorDesign(_ id: String, _ name: String, options: SandboxOptions,
+                                          a overrideA: Double? = nil, e: Double = 0.6171334) -> SandboxDesign {
+        let cScale = options.cScale
         var s = Builder()
         let P = 0.322997448918 / 365.25, m1 = 1.4398, m2 = 1.3886
         let a = overrideA ?? pow((m1 + m2) * P * P, 1.0 / 3)
@@ -134,14 +161,15 @@ nonisolated enum SandboxScenarios {
         let a1 = s.add("Pulsar", .neutronStar, mass: m1, radius: r, color: color(0.7, 0.85, 1))
         _ = s.add("Companion", .neutronStar, mass: m2, radius: r, color: color(0.85, 0.9, 1),
                   around: a1, a: a, e: e, i: 20)
-        return s.centred()
+        return s.design(id, name, options)
     }
 
     static var hulseTaylor: SandboxScenario {
         SandboxScenario(
             id: "hulse-taylor", name: "Hulse–Taylor pulsar",
             blurb: "Two neutron stars on a 7.75-hour orbit. Its long axis turns 4.2° a year, and the orbit shrinks as gravitational waves carry energy away: the first evidence for gravitational waves (Nobel Prize, 1993).",
-            bodies: hulseTaylorBodies(cScale: 1), options: SandboxOptions(relativity: true, gravitationalWaves: true),
+            design: hulseTaylorDesign("hulse-taylor", "Hulse–Taylor pulsar",
+                                      options: SandboxOptions(relativity: true, gravitationalWaves: true)),
             sceneUnitsPerAU: 1000,
             speeds: [.init(label: "1 h/s", yearsPerSecond: hour), .init(label: "6 h/s", yearsPerSecond: 6 * hour),
                      .init(label: "1 d/s", yearsPerSecond: day), .init(label: "10 d/s", yearsPerSecond: 10 * day)],
@@ -154,8 +182,9 @@ nonisolated enum SandboxScenarios {
         return SandboxScenario(
             id: "ns-merger", name: "Neutron-star merger",
             blurb: "The speed of light is turned down to 2%, making relativity 2,500× stronger, so two neutron stars spiral together in about a month instead of millions of years. Above about 2.3 solar masses the remnant collapses into a black hole.",
-            bodies: hulseTaylorBodies(cScale: cs, a: 0.0045, e: 0.2),
-            options: SandboxOptions(relativity: true, gravitationalWaves: true, cScale: cs),
+            design: hulseTaylorDesign("ns-merger", "Neutron-star merger",
+                                      options: SandboxOptions(relativity: true, gravitationalWaves: true, cScale: cs),
+                                      a: 0.0045, e: 0.2),
             sceneUnitsPerAU: 4000,
             speeds: [.init(label: "1 h/s", yearsPerSecond: hour), .init(label: "6 h/s", yearsPerSecond: 6 * hour),
                      .init(label: "1 d/s", yearsPerSecond: day)],
@@ -175,11 +204,11 @@ nonisolated enum SandboxScenarios {
         _ = s.add("Ember", .planet, mass: 0.5 * SandboxUnits.earthMass, radius: 0.8 * SandboxUnits.earthRadius, color: color(0.9, 0.45, 0.3),
                   around: b, a: 0.7, e: 0.05, i: 2, meanAnomaly: 120)
         _ = s.add("Far Wanderer", .planet, mass: 0.3 * SandboxUnits.jupiterMass, radius: 9 * SandboxUnits.earthRadius, color: color(0.6, 0.8, 0.9),
-                  aroundAll: true, a: 110, e: 0.05, i: 3, meanAnomaly: 60)
+                  a: 110, e: 0.05, i: 3, meanAnomaly: 60)
         return SandboxScenario(
             id: "alpha-cen", name: "Alpha Centauri (fictional planets)",
             blurb: "Our nearest sunlike stars orbit each other every 80 years. The planets are invented, but placed where real physics allows: close to one star, or far outside both.",
-            bodies: s.centred(), options: SandboxOptions(relativity: false), sceneUnitsPerAU: 0.35,
+            design: s.design("alpha-cen", "Alpha Centauri", SandboxOptions(relativity: false)), sceneUnitsPerAU: 0.35,
             speeds: [.init(label: "1 y/s", yearsPerSecond: 1), .init(label: "10 y/s", yearsPerSecond: 10),
                      .init(label: "40 y/s", yearsPerSecond: 40)],
             defaultSpeed: 1, follow: 0, cameraDistance: 80, gridHalfSizeAU: 130,
@@ -207,7 +236,7 @@ nonisolated enum SandboxScenarios {
         return SandboxScenario(
             id: "trappist", name: "TRAPPIST-1",
             blurb: "Seven Earth-sized planets packed around a small red star, all closer than Mercury is to the Sun. Neighbouring planets' periods form near-whole-number ratios (8:5, 5:3, 3:2, 3:2, 4:3, 3:2): a resonant chain.",
-            bodies: s.centred(), options: SandboxOptions(relativity: false), sceneUnitsPerAU: 300,
+            design: s.design("trappist", "TRAPPIST-1", SandboxOptions(relativity: false)), sceneUnitsPerAU: 300,
             speeds: [.init(label: "1 d/s", yearsPerSecond: day), .init(label: "10 d/s", yearsPerSecond: 10 * day),
                      .init(label: "100 d/s", yearsPerSecond: 100 * day)],
             defaultSpeed: 1, follow: 0, cameraDistance: 45, gridHalfSizeAU: 0.08,

@@ -448,9 +448,13 @@ struct ContentView: View {
 
     private var sandboxControls: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SandboxPlayButtons(state: sandboxState)
-            observationPicker
-            SandboxControls(state: sandboxState)
+            if sandboxState.isEditing {
+                SandboxEditor(state: sandboxState)
+            } else {
+                SandboxPlayButtons(state: sandboxState)
+                observationPicker
+                SandboxControls(state: sandboxState)
+            }
         }
     }
 
@@ -805,7 +809,7 @@ struct ContentView: View {
             Text("Scale notes")
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.tertiary)
-            Text("Galactic orbit radius ≈ 26,000 ly\nVertical bob ≈ ±100 ly / 64 Myr\nPlanetary orbits at 2 AU/unit")
+            Text("Galactic orbit radius ≈ 26,000 ly, 225 Myr per lap\nVertical bob ≈ ±280 ly / 64 Myr (drawn 4× taller)\nSpiral arms after Reid et al. 2019\nPlanetary orbits at 2 AU/unit (hugely enlarged)")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

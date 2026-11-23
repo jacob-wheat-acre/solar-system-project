@@ -10,18 +10,34 @@ import simd
 
 @Observable
 final class SandboxState {
+    /// View settings (scale, speeds, camera…) for what's on screen.
     private(set) var scenario: SandboxScenario = SandboxScenarios.all[0]
+    /// The system being simulated (a preset's design, or the user's own).
+    private(set) var design: SandboxDesign = SandboxScenarios.all[0].design
     var scenarioID: String = SandboxScenarios.all[0].id
     var options = SandboxScenarios.all[0].options { didSet { applyOptions() } }
     var speedIndex = SandboxScenarios.all[0].defaultSpeed
     var follow = SandboxScenarios.all[0].follow
     var showGrid = true
     var showTrails = true
+    var showHabitableZones = false
+    /// Ray-traced accretion disks around black holes (the sandbox has no gas, so this is
+    /// a picture of what a fed black hole looks like, not part of the simulation).
+    var showAccretionDisk = false
     private(set) var isRunning = false
-    /// Bumped when the simulation is rebuilt, so the scene is rebuilt too.
+    /// Bumped when the simulation is rebuilt and the view should refit, so the scene is rebuilt too.
     private(set) var generation = 0
     /// Bumped (asynchronously) when bodies merge or collapse, so pickers refresh.
     private(set) var bodiesVersion = 0
+
+    // Editing
+    private(set) var isEditing = false
+    var selectedBodyID: Int? { didSet { if let id = selectedBodyID { follow = id } } }
+    /// Bumped on every design edit (the scene redraws planned orbits).
+    private(set) var designVersion = 0
+    private(set) var saved: [SandboxDesign] = SandboxDesignStore.load()
+    /// The design as it was when editing began, for Discard.
+    @ObservationIgnored private var designBeforeEditing: SandboxDesign?
 
     @ObservationIgnored private(set) var sim: SandboxSimulation
     @ObservationIgnored private(set) var runningSlow = false
@@ -29,33 +45,61 @@ final class SandboxState {
     @ObservationIgnored private var lastBodySignature = ""
 
     init() {
-        sim = SandboxState.makeSim(SandboxScenarios.all[0], options: SandboxScenarios.all[0].options)
+        let s = SandboxScenarios.all[0]
+        sim = SandboxState.makeSim(s.bodies, tracker: s.tracker, options: s.options)
     }
 
-    private static func makeSim(_ s: SandboxScenario, options: SandboxOptions) -> SandboxSimulation {
-        let sim = SandboxSimulation(bodies: s.bodies, options: options,
-                                    tracker: s.tracker.map { PrecessionTracker(body: $0.body, primary: $0.primary) })
+    private static func makeSim(_ bodies: [SandboxBody], tracker: (body: Int, primary: Int)?,
+                                options: SandboxOptions) -> SandboxSimulation {
+        let sim = SandboxSimulation(bodies: bodies, options: options,
+                                    tracker: tracker.map { PrecessionTracker(body: $0.body, primary: $0.primary) })
         sim.rtol = 1e-10
         return sim
     }
 
     var speed: SandboxSpeed { scenario.speeds[min(speedIndex, scenario.speeds.count - 1)] }
+    var warnings: [SandboxWarning] { SandboxAnalysis.check(design) }
+    /// True when the current own design differs from its saved copy (or was never saved).
+    var hasUnsavedChanges: Bool {
+        guard !scenario.isPreset || isEditing else { return false }
+        var d = design; d.options = options
+        return saved.first { $0.id == design.id } != d
+    }
+
+    // MARK: Choosing a system
+
+    static let newSystemTag = "new"
 
     func select(_ id: String) {
-        let s = SandboxScenarios.scenario(id)
+        if isEditing { isEditing = false }
+        if id == Self.newSystemTag {
+            show(.custom(.blank()))
+            beginEditing()
+            return
+        }
+        if let p = SandboxScenarios.preset(id) {
+            if p.id == SandboxScenarios.blackHoleCloseUp.id { showAccretionDisk = true }
+            show(p); return
+        }
+        if let d = saved.first(where: { SandboxScenario.customID($0.id) == id }) { show(.custom(d)); return }
+        if id == SandboxScenario.customID(design.id) { show(.custom(design)) }
+    }
+
+    private func show(_ s: SandboxScenario) {
         scenario = s
-        scenarioID = id
+        design = s.design
+        scenarioID = s.id
         speedIndex = s.defaultSpeed
         follow = s.follow
-        options = s.options       // rebuilds via applyOptions → reset below anyway
+        options = s.options
         reset()
     }
 
-    /// Back to the scenario's starting state (keeps the current physics settings).
+    /// Back to the starting state (keeps the current physics settings).
     func reset() {
         isRunning = false
         lastTick = nil
-        sim = SandboxState.makeSim(scenario, options: options)
+        sim = SandboxState.makeSim(design.build().bodies, tracker: isEditing ? nil : scenario.tracker, options: options)
         lastBodySignature = ""
         runningSlow = false
         generation += 1
@@ -66,11 +110,138 @@ final class SandboxState {
         lastTick = nil
     }
 
+    // MARK: Editing
+
+    /// Edit the starting setup. A preset is copied first ("My Our Solar System" etc.).
+    func beginEditing() {
+        setRunning(false)
+        designBeforeEditing = design
+        if scenario.isPreset {
+            design.id = UUID()
+            design.name = "My \(scenario.name)"
+        }
+        design.options = options
+        isEditing = true
+        selectedBodyID = design.bodies.contains { $0.id == follow } ? follow : design.bodies.first?.id
+        rebuildForEdit()
+    }
+
+    func updateDesign(_ d: SandboxDesign) {
+        design = d
+        designVersion += 1
+        rebuildForEdit()
+    }
+
+    func updateBody(_ b: DesignBody) {
+        guard let k = design.bodies.firstIndex(where: { $0.id == b.id }) else { return }
+        var d = design
+        var nb = b
+        if nb.mass != d.bodies[k].mass || nb.kind != d.bodies[k].kind { SandboxPhysicalDefaults.applyMass(&nb) }
+        d.bodies[k] = nb
+        updateDesign(d)
+    }
+
+    /// Add a body around `parent`, just outside its outermost satellite.
+    func addBody(_ kind: SandboxBodyKind, around parent: Int?) {
+        var d = design
+        let id = d.nextID
+        let count = d.bodies.filter { $0.kind == kind }.count + 1
+        let label = switch kind {
+        case .star: "Star"; case .planet: "Planet"; case .moon: "Moon"
+        case .neutronStar: "Neutron star"; case .blackHole: "Black hole"
+        }
+        var b = SandboxPhysicalDefaults.body(kind: kind, id: id, name: "\(label) \(count)")
+        b.parent = parent
+        let par = parent.flatMap { d.body($0) }
+        let siblings = d.children(of: parent)
+        if let outer = siblings.map({ $0.a * (1 + $0.e) }).max(), outer > 0 {
+            b.a = outer * 1.6
+        } else if let par {
+            switch par.kind {
+            case .star: b.a = sqrt(SandboxPhysicalDefaults.luminosity(mass: par.mass))   // the middle of the habitable zone
+            case .planet, .moon: b.a = max(par.radius * 30, 1e-4)
+            case .neutronStar: b.a = 0.05
+            case .blackHole: b.a = max(2000 * SandboxUnits.G * par.mass / (SandboxUnits.c * SandboxUnits.c), 0.05)
+            }
+        } else {
+            b.a = 5
+        }
+        if kind == .star && par?.kind == .star { b.a = max(b.a, 20) }    // a wide companion
+        b.meanAnomaly = Double((id * 137) % 360)
+        d.bodies.append(b)
+        updateDesign(d)
+        selectedBodyID = id
+    }
+
+    /// Remove a body and everything orbiting it.
+    func deleteBody(_ id: Int) {
+        var d = design
+        let gone = d.descendants(of: id)
+        guard gone.count < d.bodies.count else { return }
+        d.bodies.removeAll { gone.contains($0.id) }
+        if let s = selectedBodyID, gone.contains(s) { selectedBodyID = d.bodies.first?.id }
+        updateDesign(d)
+    }
+
+    /// Leave edit mode and refit the view to the new system.
+    func finishEditing() {
+        isEditing = false
+        designBeforeEditing = nil
+        let keepFollow = follow
+        let s = SandboxScenario.custom(design)
+        scenario = s
+        scenarioID = s.id
+        speedIndex = s.defaultSpeed
+        follow = design.bodies.contains { $0.id == keepFollow } ? keepFollow : s.follow
+        reset()
+    }
+
+    func discardEdits() {
+        guard let before = designBeforeEditing else { return }
+        isEditing = false
+        designBeforeEditing = nil
+        if scenario.isPreset, let p = SandboxScenarios.preset(scenario.id) {
+            show(p)
+        } else {
+            show(.custom(before))
+        }
+    }
+
+    func saveDesign() {
+        var d = design
+        d.options = options
+        design = d
+        if let k = saved.firstIndex(where: { $0.id == d.id }) { saved[k] = d } else { saved.append(d) }
+        SandboxDesignStore.save(saved)
+        if !isEditing { scenarioID = SandboxScenario.customID(d.id) }
+    }
+
+    func deleteSavedDesign() {
+        saved.removeAll { $0.id == design.id }
+        SandboxDesignStore.save(saved)
+        isEditing = false
+        show(SandboxScenarios.all[0])
+    }
+
+    func rename(_ name: String) {
+        var d = design; d.name = name; design = d
+    }
+
+    /// Rebuild the simulation at t = 0 from the design, paused, without refitting the view.
+    private func rebuildForEdit() {
+        isRunning = false
+        lastTick = nil
+        sim = SandboxState.makeSim(design.build().bodies, tracker: nil, options: options)
+        lastBodySignature = ""
+        runningSlow = false
+        bodiesVersion += 1
+    }
+
     private func applyOptions() {
         guard sim.options != options else { return }
         sim.options = options
         // The precession meter measures the current physics; start it over.
-        if let t = scenario.tracker { sim.tracker = PrecessionTracker(body: t.body, primary: t.primary) }
+        if let t = scenario.tracker, !isEditing { sim.tracker = PrecessionTracker(body: t.body, primary: t.primary) }
     }
 
     /// Advance the simulation to `now`. Called once per frame from the TimelineView; touches
@@ -96,7 +267,7 @@ final class SandboxState {
 
 // MARK: - Formatting
 
-enum SandboxFormat {
+nonisolated enum SandboxFormat {
     static func elapsed(_ years: Double) -> String {
         let hours = years * 365.25 * 24
         if hours < 48 { return String(format: "%.1f hours", hours) }
@@ -110,6 +281,17 @@ enum SandboxFormat {
         if deg >= 1 { return sign + String(format: "%.2f°", deg) }
         if deg * 60 >= 1 { return sign + String(format: "%.1f′", deg * 60) }
         return sign + String(format: "%.2f″", deg * 3600)
+    }
+
+    static func mass(_ m: Double) -> String {
+        if m >= 0.05 {
+            if m >= 1e9 { return String(format: "%.2f billion M☉", m / 1e9) }
+            if m >= 1e5 { return String(format: "%.2f million M☉", m / 1e6) }
+            return String(format: "%.3g M☉", m)
+        }
+        if m >= SandboxUnits.jupiterMass * 0.05 { return String(format: "%.2f Jupiters", m / SandboxUnits.jupiterMass) }
+        let me = m / SandboxUnits.earthMass
+        return me < 0.01 ? String(format: "%.2g Earths", me) : String(format: "%.2f Earths", me)
     }
 
     static func distance(_ au: Double) -> String {
@@ -141,7 +323,10 @@ struct SandboxSceneView: View {
             let _ = state.tick(ctx.date)
             ZStack {
                 Color.black
-                SandboxContainer(state: state, generation: state.generation, frame: ctx.date)
+                SandboxContainer(state: state, generation: state.generation, frame: ctx.date,
+                                 overlay: .init(editing: state.isEditing, designVersion: state.designVersion,
+                                                selected: state.isEditing ? state.selectedBodyID : nil,
+                                                habitableZones: state.showHabitableZones || state.isEditing))
                     .ignoresSafeArea()
             }
             .overlay(alignment: .top) {
@@ -172,6 +357,7 @@ struct SandboxContainer: PlatformViewRepresentable {
     let state: SandboxState
     let generation: Int
     let frame: Date
+    let overlay: SandboxScene.OverlaySettings
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -223,13 +409,31 @@ struct SandboxContainer: PlatformViewRepresentable {
         scene.showGrid = state.showGrid
         scene.showTrails = state.showTrails
         scene.update(sim: sim)
+        scene.updateOverlay(overlay, design: state.design)
         if let i = state.followedIndex { view.orbitCenter = scene.position(of: sim.bodies[i].id) }
         view.applyOrbit()
         scene.updateForCamera(distance: view.orbitDistance)
+        updateLens(view, c, scene)
+    }
+
+    /// Ray-traced black holes: the lens pass runs only while the system has one.
+    private func updateLens(_ view: ZoomableSCNView, _ c: Coordinator, _ scene: SandboxScene) {
+        guard scene.hasBlackHoles else {
+            if view.technique != nil { view.technique = nil }
+            scene.lensActive = false
+            return
+        }
+        if c.lens == nil { c.lens = BlackHoleLens.makeTechnique() }
+        guard let lens = c.lens else { scene.lensActive = false; return }
+        if view.technique !== lens { view.technique = lens }
+        scene.lensActive = true
+        BlackHoleLens.set(lens, camera: scene.cameraNode, viewport: view.bounds.size, reverseZ: view.usesReverseZ,
+                          holes: scene.lensHoles(), disk: state.showAccretionDisk)
     }
 
     final class Coordinator: NSObject, SCNSceneRendererDelegate {
         var scene: SandboxScene?
+        var lens: SCNTechnique?
         var generation = -1
         var labels: LabelOverlay?
 
@@ -308,7 +512,7 @@ struct SandboxInfoCard: View {
     private func rows(_ sim: SandboxSimulation, _ i: Int) -> [(String, String)] {
         let b = sim.bodies[i]
         var out: [(String, String)] = []
-        out.append(("Mass", mass(b.mass)))
+        out.append(("Mass", SandboxFormat.mass(b.mass)))
         if b.kind == .blackHole {
             out.append(("Event horizon", SandboxFormat.distance(sim.schwarzschildRadius(b.mass))))
         }
@@ -333,11 +537,6 @@ struct SandboxInfoCard: View {
         return out
     }
 
-    private func mass(_ m: Double) -> String {
-        if m >= 0.05 { return m >= 1e5 ? "\(String(format: "%.2f", m / 1e6)) million M☉" : String(format: "%.3g M☉", m) }
-        if m >= SandboxUnits.jupiterMass * 0.05 { return String(format: "%.2f Jupiters", m / SandboxUnits.jupiterMass) }
-        return String(format: "%.2f Earths", m / SandboxUnits.earthMass)
-    }
 }
 
 // MARK: - Controls
@@ -372,15 +571,47 @@ struct SandboxPlayButtons: View {
 
 struct SandboxControls: View {
     @Bindable var state: SandboxState
+    @State private var confirmDelete = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Picker("System", selection: Binding(get: { state.scenarioID }, set: { state.select($0) })) {
-                ForEach(SandboxScenarios.all) { Text($0.name).tag($0.id) }
+                Section("Presets") {
+                    ForEach(SandboxScenarios.all) { Text($0.name).tag($0.id) }
+                }
+                Section("My systems") {
+                    ForEach(state.saved) { Text($0.name).tag(SandboxScenario.customID($0.id)) }
+                    if !state.scenario.isPreset && !state.saved.contains(where: { $0.id == state.design.id }) {
+                        Text("\(state.design.name) (not saved)").tag(SandboxScenario.customID(state.design.id))
+                    }
+                    Text("New system…").tag(SandboxState.newSystemTag)
+                }
             }
             .pickerStyle(.menu)
-            Text(state.scenario.blurb).font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if !state.scenario.blurb.isEmpty {
+                Text(state.scenario.blurb).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button {
+                    state.beginEditing()
+                } label: {
+                    Label(state.scenario.isPreset ? "Edit a copy" : "Edit", systemImage: "pencil")
+                }
+                if state.hasUnsavedChanges {
+                    Button { state.saveDesign() } label: { Label("Save", systemImage: "square.and.arrow.down") }
+                }
+                Spacer()
+                if !state.scenario.isPreset && state.saved.contains(where: { $0.id == state.design.id }) {
+                    Button(role: .destructive) { confirmDelete = true } label: { Image(systemName: "trash") }
+                }
+            }
+            .buttonStyle(.bordered)
+            .confirmationDialog("Delete \(state.design.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { state.deleteSavedDesign() }
+            } message: {
+                Text("This removes the saved system. It can't be undone.")
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Speed").font(.subheadline).foregroundStyle(.secondary)
@@ -421,6 +652,15 @@ struct SandboxControls: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Toggle("Trails", isOn: $state.showTrails)
+            Toggle("Habitable zones", isOn: $state.showHabitableZones)
+            if state.design.bodies.contains(where: { $0.kind == .blackHole }) {
+                Toggle("Accretion disk", isOn: $state.showAccretionDisk)
+                if state.showAccretionDisk {
+                    Text("Glowing gas spiralling into the black hole, ray traced: its light bends over the top, and the side coming toward you is brighter. Drawn for looks; the simulation has no gas.")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 

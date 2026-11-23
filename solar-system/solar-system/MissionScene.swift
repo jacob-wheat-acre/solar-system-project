@@ -43,6 +43,14 @@ final class MissionScene {
     private var craftColor: [String: NSColorLike] = [:]
     /// Body the trails are drawn relative to; nil = the mission's own frame (Sun / Earth).
     private(set) var referenceBody: String?
+    /// When the reference changes, the trails morph from the old frame to the new one
+    /// over `blendDuration` seconds instead of jumping.
+    private var fromReference: String?
+    private var blendProgress: Double = 1            // 0 = fromReference, 1 = referenceBody
+    private var blendStart: CFTimeInterval = 0
+    private static let blendDuration: CFTimeInterval = 0.9
+    private var offsetCache: [String: [SIMD3<Double>]] = [:]
+    private var blendWeight: Double { let x = blendProgress; return x * x * (3 - 2 * x) }
 
     init(mission: Mission) {
         self.mission = mission
@@ -74,21 +82,47 @@ final class MissionScene {
     /// figure-8 around the Moon); nil = the mission's own frame. See `Mission.referenceBody`.
     func setReference(_ next: String?) {
         guard next != referenceBody else { return }
+        // Turning back mid-blend reverses it from where it is, so nothing jumps.
+        let progress = next == fromReference && blendProgress < 1 ? 1 - blendProgress : 0
+        fromReference = referenceBody
         referenceBody = next
+        blendProgress = progress
+        blendStart = CACurrentMediaTime() - progress * Self.blendDuration
         buildTrails()
     }
 
+    private func offset(_ ref: String?, at t: Double) -> SIMD3<Double> {
+        ref.flatMap { mission.body($0)?.position(at: t) } ?? .zero
+    }
+
+    /// Where the trails' frame sits at time `t`: between the old and new reference bodies while blending.
     private func referenceOffset(at t: Double) -> SIMD3<Double> {
-        referenceBody.flatMap { mission.body($0)?.position(at: t) } ?? .zero
+        let to = offset(referenceBody, at: t)
+        guard blendProgress < 1 else { return to }
+        return simd_mix(offset(fromReference, at: t), to, SIMD3(repeating: blendWeight))
+    }
+
+    /// A reference body's position at each of a craft's samples (cached: the blend reuses them every frame).
+    private func offsets(_ ref: String?, for craft: MissionTrack) -> [SIMD3<Double>] {
+        guard let ref else { return Array(repeating: .zero, count: craft.times.count) }
+        let key = ref + "|" + craft.name
+        if let c = offsetCache[key] { return c }
+        let c = craft.times.map { offset(ref, at: $0) }
+        offsetCache[key] = c
+        return c
     }
 
     private func buildTrails() {
-        for trail in trails.values { trail.container.removeFromParentNode() }
+        for trail in trails.values { trail.container.removeFromParentNode(); trail.tip.removeFromParentNode() }
         trails.removeAll()
-        let ref = referenceBody.flatMap { mission.body($0) }
+        let w = blendWeight
         for craft in mission.craft {
             let color = craftColor[craft.name] ?? .white
-            let verts = zip(craft.times, craft.positions).map { t, p in scenePosition(p - (ref?.position(at: t) ?? .zero)) }
+            let to = offsets(referenceBody, for: craft)
+            let from = blendProgress < 1 ? offsets(fromReference, for: craft) : to
+            let verts = craft.positions.indices.map { i in
+                scenePosition(craft.positions[i] - simd_mix(from[i], to[i], SIMD3(repeating: w)))
+            }
             let source = SCNGeometrySource(vertices: verts)
             var idx: [Int32] = []; idx.reserveCapacity(verts.count * 2)
             for i in 0..<max(0, verts.count - 1) { idx += [Int32(i), Int32(i + 1)] }
@@ -108,7 +142,9 @@ final class MissionScene {
             root.addChildNode(container)
             trails[craft.name] = Trail(container: container, flown: flownEl, tip: tip, vertices: verts)
         }
-        for n in bodyPathNodes { n.isHidden = referenceBody != nil }
+        // Body orbit paths only make sense in the mission's own frame: fade them with the blend.
+        let shown = simd_mix(fromReference == nil ? 1.0 : 0, referenceBody == nil ? 1.0 : 0, w)
+        for n in bodyPathNodes { n.opacity = CGFloat(shown); n.isHidden = shown <= 0.001 }
     }
 
     // MARK: Coordinates
@@ -129,6 +165,10 @@ final class MissionScene {
 
     func update(date: Date) {
         let t = date.timeIntervalSince1970
+        if blendProgress < 1 {
+            blendProgress = min(1, (CACurrentMediaTime() - blendStart) / Self.blendDuration)
+            buildTrails()
+        }
         for body in mission.bodies {
             bodyNodes[body.name]?.position = scenePosition(body.position(at: t))
         }

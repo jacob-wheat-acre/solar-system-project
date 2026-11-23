@@ -57,6 +57,7 @@
 		16EAF11B2F2717B300041738 /* Exceptions for "solar-system" folder in "SolarSystemMac" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				BlackHoleLens.metal,
 				DateDisplay.swift,
 				"MissionData/apollo11.json",
 				"MissionData/cassini.json",
@@ -69,6 +70,10 @@
 				PhaseView.swift,
 				SandboxPhysics.swift,
 				SandboxScenarios.swift,
+				SandboxAnalysis.swift,
+				SandboxDesign.swift,
+				SandboxEditor.swift,
+				SandboxLens.swift,
 				SandboxScene.swift,
 				SandboxView.swift,
 				SharedSceneUI.swift,

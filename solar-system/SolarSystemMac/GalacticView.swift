@@ -16,12 +16,9 @@ final class GalacticScene {
     let scene      = SCNScene()
     let cameraNode = SCNNode()
 
-    // Galactic orbit: 225 Myr, radius 280 scene units
-    private let galYearSec: Double = 225_000_000 * 365.25 * 86_400
-    private let galR:       CGFloat = 280
-    // Vertical bob: 64 Myr, 35 scene units (exaggerated — real ~100 ly in 26 kly orbit)
-    private let oscSec: Double  = 64_000_000 * 365.25 * 86_400
-    private let oscAmp: CGFloat = 35
+    // Galactic orbit: 225 Myr, radius 280 scene units (26,000 ly)
+    private let galYearSec = GalacticModel.galYearSec
+    private let galR = CGFloat(GalacticModel.sunRadiusUnits)
     // Ecliptic tilted 60.2° to galactic plane
     private let eclTilt: Double = 60.2 * .pi / 180
     // Solar system planet scale: 2 scene units / AU
@@ -30,6 +27,9 @@ final class GalacticScene {
     private let root       = SCNNode()
     private var solarMount = SCNNode()
     private var planetNodes: [String: SCNNode] = [:]
+    /// Spiral arms (rotating at the arm pattern speed) and the bar + bulge (faster).
+    private let armPattern = SCNNode()
+    private let barPattern = SCNNode()
     private var trailSegNodes: [SCNNode] = []
 
     private let trailSegCount  = 5
@@ -82,24 +82,48 @@ final class GalacticScene {
     // MARK: Galaxy
 
     private func buildGalaxy() {
-        // Inner disk glow — sits inside the Sun's orbital radius (280 units),
-        // representing the dense inner galaxy. SCNTorus is already xz-plane; no rotation needed.
-        let diskGeo = SCNTorus(ringRadius: 80, pipeRadius: 55)
-        diskGeo.ringSegmentCount = 72; diskGeo.pipeSegmentCount = 24
-        addGlow(geo: diskGeo,
-                color: NSColor(red: 0.95, green: 0.82, blue: 0.55, alpha: 0.07),
-                parent: root, order: -3, rotateFlat: false)
+        root.addChildNode(armPattern)
+        root.addChildNode(barPattern)
 
-        // Inner bulge
-        let bulgeGeo = SCNSphere(radius: 35); bulgeGeo.segmentCount = 24
-        addGlow(geo: bulgeGeo,
-                color: NSColor(red: 1.0, green: 0.88, blue: 0.65, alpha: 0.09),
-                parent: root, order: -3)
+        // The stellar disk: flat, brightness falling off exponentially from the centre
+        // (scale length ~2.6 kpc). Drawn as a textured plane with additive blending.
+        let diskR = GalacticModel.units(kly: 50)
+        let disk = SCNPlane(width: diskR * 2, height: diskR * 2)
+        let dm = SCNMaterial()
+        dm.diffuse.contents = GalacticModel.diskTexture(size: 512, radiusKly: 50)
+        dm.lightingModel = .constant
+        dm.blendMode = .add
+        dm.isDoubleSided = true
+        dm.writesToDepthBuffer = false
+        disk.materials = [dm]
+        let diskNode = SCNNode(geometry: disk)
+        diskNode.eulerAngles.x = -.pi / 2
+        diskNode.renderingOrder = -6
+        root.addChildNode(diskNode)
 
-        // Sgr A* nucleus
-        let sgrGeo = SCNSphere(radius: 2.5); sgrGeo.segmentCount = 16
+        // Bulge: a flattened, bar-shaped glow ~3 kpc long, ~1 kpc thick. Nested
+        // ellipsoids with dim additive colour give it a soft edge.
+        let (a, b, c) = (GalacticModel.units(kly: 9.5), GalacticModel.units(kly: 4.5), GalacticModel.units(kly: 3.0))
+        for k in 0..<14 {
+            let f = pow(0.84, Double(k))
+            let g = SCNSphere(radius: 1); g.segmentCount = 32
+            let m = SCNMaterial()
+            let i = 0.012 + 0.006 * Double(k)
+            m.diffuse.contents = NSColor(red: CGFloat(i), green: CGFloat(i * 0.86), blue: CGFloat(i * 0.62), alpha: 1)
+            m.lightingModel = .constant; m.blendMode = .add
+            m.writesToDepthBuffer = false
+            g.materials = [m]
+            let n = SCNNode(geometry: g)
+            n.scale = SCNVector3(a * f, c * f, b * f)
+            n.eulerAngles.y = -CGFloat(GalacticModel.barAngle)
+            n.renderingOrder = -3
+            barPattern.addChildNode(n)
+        }
+
+        // Sgr A*: a marker for the central black hole (true size is far too small to see)
+        let sgrGeo = SCNSphere(radius: 2.0); sgrGeo.segmentCount = 16
         let sgrMat = SCNMaterial()
-        sgrMat.diffuse.contents  = NSColor(red: 1.0, green: 0.92, blue: 0.55, alpha: 1)
+        sgrMat.diffuse.contents  = NSColor(red: 1.0, green: 0.92, blue: 0.7, alpha: 1)
         sgrMat.lightingModel     = .constant
         sgrGeo.materials = [sgrMat]
         root.addChildNode(SCNNode(geometry: sgrGeo))
@@ -210,156 +234,92 @@ final class GalacticScene {
 
     // MARK: Spiral Arms
 
+    private func pointCloud(_ verts: [SCNVector3], size: CGFloat, color: NSColor, order: Int, parent: SCNNode) {
+        guard !verts.isEmpty else { return }
+        let el = SCNGeometryElement(indices: (0..<Int32(verts.count)).map { $0 }, primitiveType: .point)
+        el.pointSize = size
+        el.minimumPointScreenSpaceRadius = 0.4
+        el.maximumPointScreenSpaceRadius = size * 1.4
+        let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts)], elements: [el])
+        let mat = SCNMaterial()
+        mat.diffuse.contents = color
+        mat.lightingModel    = .constant
+        geo.materials = [mat]
+        let node = SCNNode(geometry: geo)
+        node.renderingOrder = order
+        parent.addChildNode(node)
+    }
+
     private func buildSpiralArms() {
-        // Background disk: faint haze of stars across the galactic disk
+        var rng = SplitMix64(seed: 0x4741_4C41)
+        // Background disk stars, thinning outward. The thin disk's scale height is
+        // ~300 pc (1,000 ly), so they stay within about ±1 kly of the plane.
         do {
             var verts: [SCNVector3] = []
-            for i in 0..<700 {
-                let fi    = Double(i)
-                let theta = fi * 2.399963
-                let r     = Float(80 + (fi / 700) * 440)
-                let y     = Float(sin(fi * 0.31) * 30.0 * max(0, 1.0 - Double(r) / 550.0))
-                verts.append(SCNVector3(r * Float(cos(theta)), y, r * Float(sin(theta))))
+            for _ in 0..<900 {
+                let r = GalacticModel.units(kly: 4 + 46 * pow(Double.random(in: 0...1, using: &rng), 0.8))
+                let th = Double.random(in: 0..<2 * .pi, using: &rng)
+                let y = GalacticModel.units(kly: 1.0) * Double.random(in: -1...1, using: &rng) * Double.random(in: 0...1, using: &rng)
+                verts.append(SCNVector3(r * cos(th), y, r * sin(th)))
             }
-            var idx = (0..<Int32(verts.count)).map { $0 }
-            let el = SCNGeometryElement(
-                data: Data(bytes: &idx, count: idx.count * MemoryLayout<Int32>.size),
-                primitiveType: .point, primitiveCount: verts.count,
-                bytesPerIndex: MemoryLayout<Int32>.size)
-            el.pointSize = 1.2
-            el.minimumPointScreenSpaceRadius = 0.3
-            el.maximumPointScreenSpaceRadius = 1.8
-            let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts)], elements: [el])
-            let mat = SCNMaterial()
-            mat.diffuse.contents = NSColor(white: 0.65, alpha: 0.35)
-            mat.lightingModel    = .constant
-            geo.materials = [mat]
-            let node = SCNNode(geometry: geo)
-            node.renderingOrder = -5
-            root.addChildNode(node)
+            pointCloud(verts, size: 1.2, color: NSColor(white: 0.65, alpha: 0.35), order: -5, parent: root)
         }
 
-        // 4 logarithmic spiral arms, ~13° pitch angle
-        // Name / starting angle (radians) / color
-        // Sun sits in the Orion Spur between Sagittarius and Perseus arms.
-        let b = tan(13.0 * Double.pi / 180.0)
-        let armDefs: [(offset: Double, color: NSColor)] = [
-            (0,           NSColor(red: 0.90, green: 0.83, blue: 0.58, alpha: 0.55)),  // Norma
-            (.pi / 2,     NSColor(red: 0.88, green: 0.80, blue: 0.55, alpha: 0.55)),  // Scutum-Centaurus
-            (.pi,         NSColor(red: 0.92, green: 0.88, blue: 0.68, alpha: 0.60)),  // Sagittarius (Sun side)
-            (3 * .pi / 2, NSColor(red: 0.70, green: 0.78, blue: 0.92, alpha: 0.52)),  // Perseus (bluer — younger stars)
-        ]
-        let rInner: Double = 45    // where arms emerge from the bar
-        let thetaMax: Double = 3 * .pi  // arms wrap ~1.5 times
-        let starsPerArm = 300
-
-        for arm in armDefs {
+        // Four trailing logarithmic arms, 12° pitch (Reid et al. 2019), placed so they
+        // cross the Sun–centre line at their measured distances. The Sun orbits
+        // clockwise seen from the north galactic pole, so trailing arms wind
+        // counter-clockwise going outward.
+        for arm in GalacticModel.arms {
             var verts: [SCNVector3] = []
-            for _ in 0..<starsPerArm {
-                let theta = Double.random(in: 0...thetaMax)
-                let rBase = rInner * exp(b * theta)
-                guard rBase < 490 else { continue }
-                let scatter = rBase * 0.09
-                let r       = rBase + Double.random(in: -scatter...scatter)
-                let angle   = theta + arm.offset + Double.random(in: -0.06...0.06)
-                let x = r * cos(angle)
-                let z = r * sin(angle)
-                let ySpread = 10.0 * max(0, 1.0 - r / 420)
-                let y = Double.random(in: -ySpread...ySpread)
-                verts.append(SCNVector3(x, y, z))
+            for _ in 0..<arm.stars {
+                let r0 = Double.random(in: arm.rangeKly, using: &rng)
+                // Arms are ~1 kly wide: scatter across them, denser at the centre line.
+                let across = Double.random(in: -1...1, using: &rng) * Double.random(in: 0...1, using: &rng)
+                let r = r0 + 0.9 * across
+                let th = GalacticModel.armAngle(rKly: r0, anchorKly: arm.anchorKly, pitchDeg: arm.pitchDeg)
+                    + Double.random(in: -0.03...0.03, using: &rng)
+                let y = GalacticModel.units(kly: 0.5) * Double.random(in: -1...1, using: &rng)
+                verts.append(SCNVector3(GalacticModel.units(kly: r) * cos(th), y, GalacticModel.units(kly: r) * sin(th)))
             }
-            guard !verts.isEmpty else { continue }
-            var idx = (0..<Int32(verts.count)).map { $0 }
-            let el = SCNGeometryElement(
-                data: Data(bytes: &idx, count: idx.count * MemoryLayout<Int32>.size),
-                primitiveType: .point, primitiveCount: verts.count,
-                bytesPerIndex: MemoryLayout<Int32>.size)
-            el.pointSize = 1.7
-            el.minimumPointScreenSpaceRadius = 0.4
-            el.maximumPointScreenSpaceRadius = 2.4
-            let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts)], elements: [el])
-            let mat = SCNMaterial()
-            mat.diffuse.contents = arm.color
-            mat.lightingModel    = .constant
-            geo.materials = [mat]
-            let node = SCNNode(geometry: geo)
-            node.renderingOrder = -4
-            root.addChildNode(node)
-        }
+            pointCloud(verts, size: arm.major ? 1.6 : 1.3, color: arm.color, order: -4, parent: armPattern)
 
-        // Orion Spur — minor arm where the Sun actually lives, between Sag and Perseus
-        // Runs at ~Perseus offset - π/4, shorter arc
-        do {
-            let spurOffset = 3 * Double.pi / 2 - Double.pi / 4
-            var verts: [SCNVector3] = []
-            let spurTheta = Double.pi * 0.7   // short arc
-            let rStart = rInner * exp(b * (Double.pi * 0.85))
-            for _ in 0..<100 {
-                let theta = Double.random(in: 0...spurTheta)
-                let rBase = rStart * exp(b * theta)
-                guard rBase < 380 else { continue }
-                let r     = rBase + Double.random(in: -rBase * 0.07...rBase * 0.07)
-                let angle = theta + spurOffset + Double.random(in: -0.05...0.05)
-                let x = r * cos(angle)
-                let z = r * sin(angle)
-                verts.append(SCNVector3(x, Double.random(in: -6...6), z))
-            }
-            guard !verts.isEmpty else { return }
-            var idx = (0..<Int32(verts.count)).map { $0 }
-            let el = SCNGeometryElement(
-                data: Data(bytes: &idx, count: idx.count * MemoryLayout<Int32>.size),
-                primitiveType: .point, primitiveCount: verts.count,
-                bytesPerIndex: MemoryLayout<Int32>.size)
-            el.pointSize = 1.5
-            el.minimumPointScreenSpaceRadius = 0.4
-            el.maximumPointScreenSpaceRadius = 2.0
-            let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts)], elements: [el])
-            let mat = SCNMaterial()
-            mat.diffuse.contents = NSColor(red: 0.82, green: 0.88, blue: 0.80, alpha: 0.50)
-            mat.lightingModel    = .constant
-            geo.materials = [mat]
-            let node = SCNNode(geometry: geo)
-            node.renderingOrder = -4
-            root.addChildNode(node)
+            // Label partway along the arm, beyond the Sun's orbit where it's uncluttered.
+            let rl = arm.labelKly
+            let th = GalacticModel.armAngle(rKly: rl, anchorKly: arm.anchorKly, pitchDeg: arm.pitchDeg)
+            let text = SCNText(string: arm.name, extrusionDepth: 0)
+            text.font = NSFont.systemFont(ofSize: 6, weight: .light)
+            text.flatness = 0.5
+            let m = SCNMaterial()
+            m.diffuse.contents = arm.color.withAlphaComponent(0.7)
+            m.lightingModel = .constant
+            text.materials = [m]
+            let tn = SCNNode(geometry: text)
+            tn.scale = SCNVector3(0.5, 0.5, 0.5)
+            tn.position = SCNVector3(GalacticModel.units(kly: rl) * cos(th), 3, GalacticModel.units(kly: rl) * sin(th))
+            let bb = SCNBillboardConstraint(); bb.freeAxes = .all
+            tn.constraints = [bb]
+            armPattern.addChildNode(tn)
         }
     }
 
     // MARK: Galactic Bar
 
     private func buildGalacticBar() {
-        // The Milky Way bar is ~27,000 ly long, oriented ~44° to the Sun–center line.
-        // In scene coords at t=0: toward-Sun is +x, so bar runs at 44° in the xz-plane.
-        // Visually scaled to ~75 half-length units (bar fills the inner disk).
-        let barAngle = 44.0 * Double.pi / 180.0
-        let halfLen: Double = 72
-        let perpAngle = barAngle + .pi / 2
+        // The long bar: ~5 kpc (16 kly) half-length, its near end ~28° from the
+        // Sun–centre line toward positive longitude (Wegg, Gerhard & Portail 2015).
+        var rng = SplitMix64(seed: 0x4241_5221)
+        let halfLen = GalacticModel.units(kly: 16)
         var verts: [SCNVector3] = []
-        for _ in 0..<120 {
-            let s = Double.random(in: -halfLen...halfLen)
-            let widthFrac = 1.0 - abs(s) / halfLen
-            let w = 14.0 * widthFrac
-            let scatter = Double.random(in: -w...w)
-            let x = s * cos(barAngle) + scatter * cos(perpAngle)
-            let z = s * sin(barAngle) + scatter * sin(perpAngle)
-            let y = Double.random(in: -3...3)
-            verts.append(SCNVector3(x, y, z))
+        for _ in 0..<260 {
+            let s = halfLen * Double.random(in: -1...1, using: &rng)
+            let w = GalacticModel.units(kly: 4.5) * (1 - 0.7 * abs(s) / halfLen) * Double.random(in: -1...1, using: &rng)
+            let y = GalacticModel.units(kly: 1.0) * (1 - 0.6 * abs(s) / halfLen) * Double.random(in: -1...1, using: &rng)
+            verts.append(SCNVector3(s, y, w))
         }
-        var idx = (0..<Int32(verts.count)).map { $0 }
-        let el = SCNGeometryElement(
-            data: Data(bytes: &idx, count: idx.count * MemoryLayout<Int32>.size),
-            primitiveType: .point, primitiveCount: verts.count,
-            bytesPerIndex: MemoryLayout<Int32>.size)
-        el.pointSize = 2.2
-        el.minimumPointScreenSpaceRadius = 0.5
-        el.maximumPointScreenSpaceRadius = 3.0
-        let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: verts)], elements: [el])
-        let mat = SCNMaterial()
-        mat.diffuse.contents = NSColor(red: 1.0, green: 0.90, blue: 0.62, alpha: 0.60)
-        mat.lightingModel    = .constant
-        geo.materials = [mat]
-        let node = SCNNode(geometry: geo)
-        node.renderingOrder = -3
-        root.addChildNode(node)
+        let bar = SCNNode()
+        bar.eulerAngles.y = -CGFloat(GalacticModel.barAngle)
+        barPattern.addChildNode(bar)
+        pointCloud(verts, size: 2.2, color: NSColor(red: 1.0, green: 0.88, blue: 0.62, alpha: 0.6), order: -3, parent: bar)
     }
 
     // MARK: Landmarks
@@ -469,6 +429,9 @@ final class GalacticScene {
         let t   = date.timeIntervalSince(j2000)
         let pos = galPos(t: t)
         solarMount.position = pos
+        // Arms and bar rotate the same way as the Sun's orbit (x toward +z), each at its own pattern speed.
+        armPattern.eulerAngles.y = -CGFloat(2 * .pi * t / GalacticModel.armPatternSec)
+        barPattern.eulerAngles.y = -CGFloat(2 * .pi * t / GalacticModel.barPatternSec)
 
         let visible: Set<String> = ["Mercury","Venus","Earth","Mars","Jupiter","Saturn","Uranus","Neptune"]
         for body in BodyCatalog.planetsAndDwarfs where visible.contains(body.name) {
@@ -482,10 +445,9 @@ final class GalacticScene {
 
     private func galPos(t: Double) -> SCNVector3 {
         let omG = 2.0 * .pi / galYearSec
-        let omO = 2.0 * .pi / oscSec
         let gx  = Double(galR) * cos(omG * t)
         let gz  = Double(galR) * sin(omG * t)
-        let gy  = Double(oscAmp) * sin(omO * t)
+        let gy  = GalacticModel.units(kly: GalacticModel.heightLY(t) / 1000 * GalacticModel.bobExaggeration)
         return SCNVector3(gx, gy, gz)
     }
 
@@ -681,9 +643,7 @@ struct GalacticView: View {
 
     @State private var selectedLandmark: LandmarkInfo? = nil
 
-    private let galYearSec: Double = 225_000_000 * 365.25 * 86_400
-    private let oscSec:     Double = 64_000_000  * 365.25 * 86_400
-    private let oscAmp:     Double = 35.0
+    private let galYearSec = GalacticModel.galYearSec
     private let j2000 = Date(timeIntervalSinceReferenceDate: -978_307_200)
 
     var body: some View {
@@ -797,11 +757,93 @@ struct GalacticView: View {
     private func computeStats() -> GalacticStats {
         let t    = simulationDate.timeIntervalSince(j2000)
         let omG  = 2.0 * .pi / galYearSec
-        let omO  = 2.0 * .pi / oscSec
         var frac = (omG * t).truncatingRemainder(dividingBy: 2 * .pi) / (2 * .pi)
         if frac < 0 { frac += 1 }
-        let heightLY   = oscAmp * sin(omO * t) * (100.0 / oscAmp)
+        let heightLY   = GalacticModel.heightLY(t)
         let galacticYr = t / galYearSec
         return GalacticStats(orbitFraction: frac, heightLY: heightLY, galacticYears: galacticYr)
+    }
+}
+
+// MARK: - Galactic model
+
+/// Measured numbers for the Milky Way, shared by the scene and the stats card.
+/// Scene scale: 280 units = 26,000 ly (the Sun's distance from the centre).
+enum GalacticModel {
+    static let sunRadiusUnits = 280.0
+    static func units(kly: Double) -> Double { kly * sunRadiusUnits / 26 }
+
+    static let year = 365.25 * 86_400
+    /// The Sun's orbit: ~225 Myr per lap.
+    static let galYearSec = 225e6 * year
+    /// Spiral pattern speed ~26 km/s/kpc (estimates range ~20–30): close to the Sun's
+    /// own, so the Sun drifts past the arms only slowly.
+    static let armPatternSec = 240e6 * year
+    /// The bar turns faster, ~40 km/s/kpc (Portail et al. 2017).
+    static let barPatternSec = 160e6 * year
+    /// The bar's near end points ~28° from the Sun–centre line, toward positive longitude.
+    static let barAngle = 28.0 * .pi / 180
+
+    /// The Sun bobs through the disk: ±~280 ly (~85 pc), ~64 Myr per full cycle. Today
+    /// it's ~65 ly (~20 pc) above the plane and moving north.
+    static let bobAmplitudeLY = 280.0
+    static let bobPeriodSec = 64e6 * year
+    static let bobPhase = asin(65.0 / 280.0)
+    /// The bob is drawn exaggerated so it's visible against the 26,000-ly orbit.
+    static let bobExaggeration = 4.0
+    static func heightLY(_ t: Double) -> Double {
+        bobAmplitudeLY * sin(2 * .pi * t / bobPeriodSec + bobPhase)
+    }
+
+    struct Arm {
+        let name: String
+        let anchorKly: Double      // where it crosses the Sun–centre line (Sun side)
+        let pitchDeg: Double
+        let rangeKly: ClosedRange<Double>
+        let labelKly: Double
+        let stars: Int
+        let major: Bool
+        let color: NSColor
+    }
+
+    /// Arm crossings of the Sun–centre line from Reid et al. (2019), scaled to R☉ = 26 kly.
+    static let arms: [Arm] = [
+        Arm(name: "Scutum–Centaurus", anchorKly: 16.5, pitchDeg: 12, rangeKly: 14...50, labelKly: 40, stars: 1100, major: true,
+            color: NSColor(red: 0.88, green: 0.82, blue: 0.62, alpha: 0.55)),
+        Arm(name: "Sagittarius–Carina", anchorKly: 21.5, pitchDeg: 12, rangeKly: 14...48, labelKly: 36, stars: 850, major: false,
+            color: NSColor(red: 0.92, green: 0.86, blue: 0.70, alpha: 0.5)),
+        Arm(name: "Orion Spur", anchorKly: 26.0, pitchDeg: 12, rangeKly: 23.5...29.5, labelKly: 28.5, stars: 220, major: false,
+            color: NSColor(red: 0.82, green: 0.88, blue: 0.80, alpha: 0.5)),
+        Arm(name: "Perseus", anchorKly: 32.0, pitchDeg: 12, rangeKly: 14...52, labelKly: 44, stars: 1100, major: true,
+            color: NSColor(red: 0.72, green: 0.80, blue: 0.95, alpha: 0.55)),
+        Arm(name: "Outer", anchorKly: 44.0, pitchDeg: 12, rangeKly: 16...55, labelKly: 52, stars: 700, major: false,
+            color: NSColor(red: 0.70, green: 0.76, blue: 0.92, alpha: 0.42)),
+    ]
+
+    /// Azimuth (radians, x toward +z) of a trailing log spiral at radius r: it crosses
+    /// the Sun–centre line (+x at J2000) at `anchorKly`, and winds against the rotation going outward.
+    static func armAngle(rKly r: Double, anchorKly: Double, pitchDeg: Double) -> Double {
+        -log(r / anchorKly) / tan(pitchDeg * .pi / 180)
+    }
+
+    /// Face-on disk brightness: exponential with a 2.6 kpc (8.5 kly) scale length, fading at the edge.
+    static func diskTexture(size: Int, radiusKly: Double) -> CGImage? {
+        var px = [UInt8](repeating: 0, count: size * size * 4)
+        let h = 8.5
+        for y in 0..<size {
+            for x in 0..<size {
+                let dx = (Double(x) + 0.5) / Double(size) * 2 - 1, dy = (Double(y) + 0.5) / Double(size) * 2 - 1
+                let r = sqrt(dx * dx + dy * dy) * radiusKly
+                let edge = max(0, min(1, (radiusKly - r) / 6))
+                let v = 0.20 * exp(-r / h) * edge
+                let i = (y * size + x) * 4
+                px[i] = UInt8(min(255, v * 255)); px[i + 1] = UInt8(min(255, v * 0.88 * 255))
+                px[i + 2] = UInt8(min(255, v * 0.70 * 255)); px[i + 3] = 255
+            }
+        }
+        guard let ctx = CGContext(data: &px, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        return ctx.makeImage()
     }
 }

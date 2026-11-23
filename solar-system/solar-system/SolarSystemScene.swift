@@ -910,40 +910,6 @@ final class SolarSystemScene {
         let gcAnchor = SCNNode(); gcAnchor.position = gcPos; gcAnchor.name = "Galactic Center ★"
         celestialRoot.addChildNode(gcAnchor); celestialNodeDict["Galactic Center ★"] = gcAnchor
 
-        // EHT-style Sgr A* visual: photon ring + event horizon shadow, inspired by the
-        // 2022 Event Horizon Telescope image of Sagittarius A*.
-        let gcVisual = SCNNode()
-        gcVisual.position = eclipticToScene(lonDeg: 267, latDeg: -5.5, radius: radius * 0.985)
-        // Tilt so the disk reads as inclined — not perfectly face-on like the real EHT image.
-        gcVisual.eulerAngles = SCNVector3(CGFloat.pi * 0.30, CGFloat.pi * 0.12, 0)
-
-        // Outer diffuse halo — wide, very faint orange
-        let haloGeo = SCNTorus(ringRadius: 8.5, pipeRadius: 6.0)
-        let haloMat = SCNMaterial()
-        haloMat.emission.contents = NSColorLike(red: 0.9, green: 0.35, blue: 0.0, alpha: 0.10)
-        haloMat.lightingModel = .constant
-        haloGeo.materials = [haloMat]
-        gcVisual.addChildNode(SCNNode(geometry: haloGeo))
-
-        // Photon ring — the bright orange-white ring seen in EHT images
-        let ringGeo = SCNTorus(ringRadius: 7.0, pipeRadius: 1.3)
-        let ringMat = SCNMaterial()
-        ringMat.emission.contents = NSColorLike(red: 1.0, green: 0.68, blue: 0.15, alpha: 0.95)
-        ringMat.lightingModel = .constant
-        ringGeo.materials = [ringMat]
-        gcVisual.addChildNode(SCNNode(geometry: ringGeo))
-
-        // Event horizon shadow — dark sphere filling the ring's inner hole
-        let shadowGeo = SCNSphere(radius: 5.8)
-        shadowGeo.segmentCount = 24
-        let shadowMat = SCNMaterial()
-        shadowMat.diffuse.contents  = NSColorLike.black
-        shadowMat.lightingModel     = .constant
-        shadowGeo.materials = [shadowMat]
-        gcVisual.addChildNode(SCNNode(geometry: shadowGeo))
-
-        celestialRoot.addChildNode(gcVisual)
-
         // Sun's direction of travel in galactic orbit: ecl lon≈348°, lat≈+60° (toward Cygnus)
         let travelAnchor = SCNNode()
         travelAnchor.position = eclipticToScene(lonDeg: 348, latDeg: 60, radius: radius)

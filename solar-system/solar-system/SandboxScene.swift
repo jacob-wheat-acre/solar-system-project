@@ -9,9 +9,8 @@ import AppKit
 
 /// SceneKit view of a `SandboxSimulation`. Sim coordinates (AU, z = up) map to scene
 /// axes as (x, z, y) × `scale`, like the rest of the app. Bodies are drawn at true size
-/// with a minimum on-screen size. Black holes get a glowing photon-sphere ring
-/// (1.5 r_s, always facing the camera) and a faint ISCO circle (3 r_s, the innermost
-/// stable circular orbit).
+/// with a minimum on-screen size. Black holes are ray traced by `BlackHoleLens` (a
+/// post-process pass); the plain black disc with an outline is the fallback.
 final class SandboxScene {
     let scene = SCNScene()
     let cameraNode = SCNNode()
@@ -24,6 +23,7 @@ final class SandboxScene {
     private var trueRadius: [Int: Float] = [:]
     private var names: [Int: String] = [:]
     private var lights: [Int: SCNNode] = [:]
+    private var bodyStyle: [Int: String] = [:]
     private let trailNode = SCNNode()
     private let grid: GravityGrid
     private let extent: Float
@@ -67,10 +67,12 @@ final class SandboxScene {
         let alive = Set(sim.bodies.map(\.id))
         for (id, node) in bodyNodes where !alive.contains(id) {
             node.removeFromParentNode(); lights[id]?.removeFromParentNode()
-            bodyNodes[id] = nil; lights[id] = nil
+            bodyNodes[id] = nil; lights[id] = nil; names[id] = nil; bodyStyle[id] = nil
         }
         for b in sim.bodies {
-            if bodyNodes[b.id] == nil || bodyKind[b.id] != b.kind { addBody(b, sim: sim) }
+            let style = "\(b.kind)|\(b.color)"
+            if bodyNodes[b.id] == nil || bodyStyle[b.id] != style { addBody(b, sim: sim); bodyStyle[b.id] = style }
+            names[b.id] = b.name
             trueRadius[b.id] = Float(sim.effectiveRadius(b) * scale)
             let p = scenePosition(b.position)
             bodyNodes[b.id]?.position = p
@@ -78,6 +80,7 @@ final class SandboxScene {
         }
         if showTrails { updateTrails(sim) }
         if showGrid { grid.update(sim: sim, scale: scale) }
+        updateHabitableZones(sim)
     }
 
     /// Keeps bodies a minimum on-screen size and the sky at infinity.
@@ -101,6 +104,32 @@ final class SandboxScene {
         }
     }
 
+    // MARK: Black holes
+
+    /// While the ray-traced lens (`BlackHoleLens`) is on, it draws the black holes; the
+    /// plain black disc is only a fallback.
+    var lensActive = false {
+        didSet {
+            guard lensActive != oldValue else { return }
+            for (id, node) in bodyNodes where bodyKind[id] == .blackHole { node.childNodes.forEach { $0.isHidden = lensActive } }
+        }
+    }
+
+    var hasBlackHoles: Bool { bodyKind.values.contains(.blackHole) }
+
+    /// Black holes for the lens shader, nearest first. Like other bodies they keep a minimum
+    /// on-screen size: the Schwarzschild radius is enlarged so the shadow (2.6 r_s) never
+    /// shrinks below ~1.2% of the viewing distance, and is true size up close.
+    func lensHoles() -> [BlackHoleLens.Hole] {
+        let cam = simd_float3(cameraNode.worldPosition)
+        return bodyNodes.compactMap { id, node -> BlackHoleLens.Hole? in
+            guard bodyKind[id] == .blackHole else { return nil }
+            let p = simd_float3(node.worldPosition)
+            return .init(position: p, rs: max(trueRadius[id] ?? 0, 0.012 * simd_distance(p, cam) / 2.6))
+        }
+        .sorted { simd_distance($0.position, cam) < simd_distance($1.position, cam) }
+    }
+
     func labelAnchors() -> [(name: String, node: SCNNode)] {
         bodyNodes.compactMap { id, node in names[id].map { ($0, node) } }
     }
@@ -122,21 +151,14 @@ final class SandboxScene {
             mat.lightingModel = .constant
             sphere.materials = [mat]
             node.addChildNode(SCNNode(geometry: sphere))
-            // Photon sphere: light can orbit here. Drawn as a ring that faces the camera.
-            let ring = SCNTorus(ringRadius: 1.5, pipeRadius: 0.07)
-            let rm = SCNMaterial()
-            rm.diffuse.contents = NSColorLike(red: 1, green: 0.62, blue: 0.25, alpha: 1)
-            rm.lightingModel = .constant; rm.blendMode = .add
-            ring.materials = [rm]
-            let ringNode = SCNNode(geometry: ring)
-            ringNode.eulerAngles.x = .pi / 2
-            let facing = SCNNode(); facing.addChildNode(ringNode)
+            // A thin outline facing the camera, so the black disc shows against the sky.
+            let outline = SCNNode(geometry: SceneLines.circle(
+                radius: 1, material: SceneLines.material(NSColorLike(white: 1, alpha: 0.45))))
+            outline.eulerAngles.x = .pi / 2
+            let facing = SCNNode(); facing.addChildNode(outline)
             facing.constraints = [SCNBillboardConstraint()]
             node.addChildNode(facing)
-            // ISCO: nothing can orbit stably inside 3 r_s.
-            let isco = SCNNode(geometry: SceneLines.circle(
-                radius: 3, material: SceneLines.material(NSColorLike(red: 1, green: 0.5, blue: 0.3, alpha: 0.35))))
-            node.addChildNode(isco)
+            node.childNodes.forEach { $0.isHidden = lensActive }
         case .neutronStar:
             mat.diffuse.contents = color(b.color)
             mat.emission.contents = color(b.color)
@@ -165,6 +187,111 @@ final class SandboxScene {
         names[b.id] = b.name
     }
 
+    // MARK: Editing overlays
+
+    struct OverlaySettings: Equatable {
+        var editing = false
+        var designVersion = 0
+        var selected: Int?
+        var habitableZones = false
+    }
+
+    private let overlayNode = SCNNode()
+    private var lastOverlay: OverlaySettings?
+    private var lastDesignID: UUID?
+    private var hzNodes: [Int: (mass: Double, node: SCNNode)] = [:]
+    var showHabitableZones = false
+
+    /// Planned (Kepler) orbits while editing, the selected body's moon zone, and habitable zones.
+    func updateOverlay(_ o: OverlaySettings, design: SandboxDesign) {
+        showHabitableZones = o.habitableZones
+        guard o != lastOverlay || design.id != lastDesignID else { return }
+        lastOverlay = o; lastDesignID = design.id
+        if overlayNode.parent == nil { root.addChildNode(overlayNode) }
+        overlayNode.childNodes.forEach { $0.removeFromParentNode() }
+        guard o.editing else { return }
+        let (built, centres) = design.build()
+        let pos = Dictionary(uniqueKeysWithValues: built.map { ($0.id, $0.position) })
+        for b in design.bodies {
+            guard let c = centres[b.id], b.a > 0, b.e < 1 else { continue }
+            let pts = Kepler.orbitPoints(a: b.a, e: b.e, i: b.i, node: b.node, argPeri: b.argPeri).map { scenePosition(c + $0) }
+            let sel = b.id == o.selected
+            let col = sel ? NSColorLike(red: 1, green: 0.85, blue: 0.4, alpha: 1)
+                          : NSColorLike(white: 1, alpha: 0.45)
+            overlayNode.addChildNode(SCNNode(geometry: dashed(pts, SceneLines.material(col))))
+        }
+        // Where moons of the selected body could orbit: outside the Roche limit (red),
+        // inside half the Hill sphere (teal).
+        if let id = o.selected, let b = design.body(id), let p = pos[id] {
+            let zone = SandboxAnalysis.moonZone(b, in: design)
+            let centre = SCNNode(); centre.position = scenePosition(p)
+            if zone.roche > 0 {
+                centre.addChildNode(SCNNode(geometry: SceneLines.circle(
+                    radius: Float(zone.roche * scale),
+                    material: SceneLines.material(NSColorLike(red: 1, green: 0.35, blue: 0.3, alpha: 0.8)))))
+            }
+            if let h = zone.hill {
+                centre.addChildNode(SCNNode(geometry: dashed(
+                    (0...96).map { k in
+                        let t = Double(k) / 96 * 2 * .pi
+                        return SCNVector3(SCNFloat(h * scale * cos(t)), 0, SCNFloat(h * scale * sin(t)))
+                    }, SceneLines.material(NSColorLike(red: 0.3, green: 0.9, blue: 0.85, alpha: 0.8)))))
+            }
+            overlayNode.addChildNode(centre)
+        }
+    }
+
+    /// Every other segment of a polyline.
+    private func dashed(_ pts: [SCNVector3], _ m: SCNMaterial) -> SCNGeometry {
+        var idx: [Int32] = []
+        for k in Swift.stride(from: 0, to: pts.count - 1, by: 2) { idx += [Int32(k), Int32(k + 1)] }
+        let g = SCNGeometry(sources: [SCNGeometrySource(vertices: pts)],
+                            elements: [SCNGeometryElement(indices: idx, primitiveType: .line)])
+        g.materials = [m]
+        return g
+    }
+
+    /// Green annuli around each star, riding along with it.
+    private func updateHabitableZones(_ sim: SandboxSimulation) {
+        let stars = showHabitableZones ? sim.bodies.filter { $0.kind == .star } : []
+        let ids = Set(stars.map(\.id))
+        for (id, h) in hzNodes where !ids.contains(id) { h.node.removeFromParentNode(); hzNodes[id] = nil }
+        for s in stars {
+            if hzNodes[s.id]?.mass != s.mass {
+                hzNodes[s.id]?.node.removeFromParentNode()
+                let hz = SandboxAnalysis.habitableZone(starMass: s.mass)
+                let n = SCNNode(geometry: annulus(inner: Float(hz.lowerBound * scale), outer: Float(hz.upperBound * scale)))
+                root.addChildNode(n)
+                hzNodes[s.id] = (s.mass, n)
+            }
+            hzNodes[s.id]?.node.position = scenePosition(s.position)
+        }
+    }
+
+    private func annulus(inner: Float, outer: Float, segments: Int = 128) -> SCNGeometry {
+        var v: [SCNVector3] = [], idx: [Int32] = []
+        for k in 0...segments {
+            let a = Float(k) / Float(segments) * 2 * .pi
+            v.append(SCNVector3(SCNFloat(inner * cos(a)), 0, SCNFloat(inner * sin(a))))
+            v.append(SCNVector3(SCNFloat(outer * cos(a)), 0, SCNFloat(outer * sin(a))))
+            if k < segments {
+                let i = Int32(2 * k)
+                idx += [i, i + 1, i + 2, i + 1, i + 3, i + 2]
+            }
+        }
+        let g = SCNGeometry(sources: [SCNGeometrySource(vertices: v)],
+                            elements: [SCNGeometryElement(indices: idx, primitiveType: .triangles)])
+        let m = SCNMaterial()
+        // Additive blending: a dim colour reads as a faint green glow.
+        m.diffuse.contents = NSColorLike(red: 0.03, green: 0.16, blue: 0.06, alpha: 1)
+        m.lightingModel = .constant
+        m.blendMode = .add
+        m.isDoubleSided = true
+        m.writesToDepthBuffer = false
+        g.materials = [m]
+        return g
+    }
+
     // MARK: Trails
 
     private var trailGeometryCache: [Int: SCNNode] = [:]
@@ -173,7 +300,10 @@ final class SandboxScene {
         let alive = Set(sim.bodies.map(\.id))
         for (id, n) in trailGeometryCache where !alive.contains(id) { n.removeFromParentNode(); trailGeometryCache[id] = nil }
         for b in sim.bodies {
-            guard var pts = sim.trails[b.id], pts.count > 1 else { continue }
+            guard var pts = sim.trails[b.id], pts.count > 1 else {
+                trailGeometryCache[b.id]?.removeFromParentNode(); trailGeometryCache[b.id] = nil
+                continue
+            }
             pts.append(b.position)
             // Fade from transparent (oldest) to the body colour (newest), drawn additively.
             var verts: [SCNVector3] = [], colors: [SIMD4<Float>] = []

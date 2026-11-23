@@ -131,3 +131,27 @@ struct SandboxPhysicsTests {
         #expect(abs((1 - sim.clockRate(1)) - 6.96e-10) / 6.96e-10 < 0.01)
     }
 }
+
+/// The light-bending integration the black-hole shader uses (BlackHoleLens.metal).
+struct SchwarzschildRayTests {
+    @Test func shadowEdgeIsAtTheCriticalImpactParameter() {
+        let bc = SchwarzschildRay.criticalImpactParameter
+        #expect(SchwarzschildRay.deflection(b: bc * 0.999) == nil)
+        #expect(SchwarzschildRay.deflection(b: bc * 1.001) != nil)
+    }
+
+    @Test func weakFieldMatchesEinstein() {
+        // α = 2 r_s / b far from the hole (the 1919 eclipse result).
+        for b in [200.0, 1000.0] {
+            let a = try! #require(SchwarzschildRay.deflection(b: b))
+            #expect(abs(a / (2 / b) - 1) < 0.01, "b = \(b): \(a)")
+        }
+    }
+
+    @Test func bendingGrowsWithoutLimitNearThePhotonSphere() {
+        let bc = SchwarzschildRay.criticalImpactParameter
+        let a = [1.5, 1.1, 1.01, 1.001].map { SchwarzschildRay.deflection(b: bc * $0)! }
+        #expect(a == a.sorted())
+        #expect(a.last! > 2 * .pi)      // light circles the hole before escaping
+    }
+}

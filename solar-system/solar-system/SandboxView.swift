@@ -44,6 +44,14 @@ final class SandboxState {
     @ObservationIgnored private var lastTick: Date?
     @ObservationIgnored private var lastBodySignature = ""
 
+    // Fling mode: drag in the scene to throw a body into the running system.
+    var flingMode = false { didSet { if !flingMode { cancelFling() } } }
+    var flingKind: FlingKind = .planet
+    /// Speed readout while dragging.
+    private(set) var flingReadout: String?
+    @ObservationIgnored private(set) var flingDrag: FlingDrag?
+    @ObservationIgnored private var flingCount = 0
+
     init() {
         let s = SandboxScenarios.all[0]
         sim = SandboxState.makeSim(s.bodies, tracker: s.tracker, options: s.options)
@@ -102,6 +110,8 @@ final class SandboxState {
         sim = SandboxState.makeSim(design.build().bodies, tracker: isEditing ? nil : scenario.tracker, options: options)
         lastBodySignature = ""
         runningSlow = false
+        flingCount = 0
+        cancelFling()
         generation += 1
     }
 
@@ -114,6 +124,7 @@ final class SandboxState {
 
     /// Edit the starting setup. A preset is copied first ("My Our Solar System" etc.).
     func beginEditing() {
+        flingMode = false
         setRunning(false)
         designBeforeEditing = design
         if scenario.isPreset {
@@ -259,6 +270,64 @@ final class SandboxState {
         }
     }
 
+    // MARK: Fling
+
+    /// A drag started at `p` (sim coordinates, AU). The throw is set up relative to the
+    /// body that controls motion there, so it rides along with it while the sim runs.
+    func flingBegan(at p: SIMD3<Double>) {
+        guard flingMode, !isEditing, let j = sim.dominantBody(at: p) else { return }
+        let c = sim.bodies[j]
+        let offset = p - c.position
+        let d = simd_length(offset)
+        guard d > max(sim.effectiveRadius(c) * 1.5, 1e-12) else { return }   // not from inside a body
+        flingDrag = FlingDrag(dominantID: c.id, dominantName: c.name, startOffset: offset, endOffset: offset, distance: d)
+        flingReadout = "Drag out to set speed · to the \(c.name)'s distance = circular orbit"
+    }
+
+    func flingMoved(to p: SIMD3<Double>) {
+        guard var f = flingDrag, let j = sim.bodies.firstIndex(where: { $0.id == f.dominantID }) else { return }
+        let c = sim.bodies[j]
+        f.endOffset = p - c.position
+        f.ratio = simd_length(f.endOffset - f.startOffset) / f.distance
+        let moved = f.predictedFor.map { simd_length(f.endOffset - $0) >= 0.01 * f.distance } ?? true
+        if moved && f.ratio > 0.02 {
+            // Long enough to show a whole bound orbit (vis-viva: 1/a = (2 − ratio²)/d), or 1.5
+            // circular periods for an escape.
+            let m = c.mass + flingKind.mass
+            let a = f.ratio * f.ratio < 1.96 ? f.distance / (2 - f.ratio * f.ratio) : f.distance
+            let periods = f.ratio * f.ratio < 1.96 ? 1.05 : 1.5
+            f.path = sim.predictPath(adding: flungBody(f, c), relativeTo: j, duration: periods * sqrt(a * a * a / m))
+            f.predictedFor = f.endOffset
+        }
+        flingDrag = f
+        let what = f.ratio < 0.98 ? "ellipse, falls inward" : f.ratio <= 1.02 ? "circular orbit"
+                 : f.ratio < 2.0.squareRoot() ? "ellipse, swings outward" : "escapes"
+        flingReadout = String(format: "%.2f× circular speed around %@ · %@", f.ratio, f.dominantName, what)
+    }
+
+    func flingEnded() {
+        defer { cancelFling() }
+        guard let f = flingDrag, f.ratio > 0.02, let c = sim.bodies.first(where: { $0.id == f.dominantID }) else { return }
+        sim.add(flungBody(f, c))
+        flingCount += 1
+        bodiesVersion += 1
+    }
+
+    func cancelFling() {
+        flingDrag = nil
+        if flingReadout != nil { flingReadout = nil }
+    }
+
+    private func flungBody(_ f: FlingDrag, _ c: SandboxBody) -> SandboxBody {
+        let drag = f.endOffset - f.startOffset
+        let len = simd_length(drag)
+        let vCirc = sqrt(SandboxUnits.G * (c.mass + flingKind.mass) / f.distance)
+        var b = flingKind.body(id: sim.nextID, name: "Flung \(flingKind.noun) \(flingCount + 1)")
+        b.position = c.position + f.startOffset
+        b.velocity = c.velocity + (len > 0 ? drag / len * f.ratio * vCirc : .zero)
+        return b
+    }
+
     /// The followed body, or the heaviest one if it no longer exists (merged / swallowed).
     var followedIndex: Int? {
         sim.bodies.firstIndex { $0.id == follow } ?? sim.bodies.indices.max { sim.bodies[$0].mass < sim.bodies[$1].mass }
@@ -318,12 +387,19 @@ struct SandboxSceneView: View {
     let state: SandboxState
     var cardBottomInset: CGFloat = 0
 
+    #if os(iOS)
+    static let flingHint = "Drag from where it starts, the way to throw · two fingers to orbit"
+    #else
+    static let flingHint = "Drag from where it starts, the way to throw · right-drag or ⌥-drag to orbit"
+    #endif
+
     var body: some View {
         TimelineView(.animation(paused: !state.isRunning)) { ctx in
             let _ = state.tick(ctx.date)
             ZStack {
                 Color.black
                 SandboxContainer(state: state, generation: state.generation, frame: ctx.date,
+                                 fling: state.flingMode && !state.isEditing,
                                  overlay: .init(editing: state.isEditing, designVersion: state.designVersion,
                                                 selected: state.isEditing ? state.selectedBodyID : nil,
                                                 habitableZones: state.showHabitableZones || state.isEditing))
@@ -342,6 +418,19 @@ struct SandboxSceneView: View {
                 .clipShape(Capsule())
                 .padding(.top, 10)
             }
+            .overlay(alignment: .top) {
+                if state.flingMode && !state.isEditing {
+                    Text(state.flingReadout ?? Self.flingHint)
+                        .font(.callout)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                        .padding(.top, 56)
+                        .padding(.horizontal, 16)
+                        .allowsHitTesting(false)
+                }
+            }
             .overlay(alignment: .bottomLeading) {
                 SandboxInfoCard(state: state)
                     .padding(12)
@@ -357,6 +446,7 @@ struct SandboxContainer: PlatformViewRepresentable {
     let state: SandboxState
     let generation: Int
     let frame: Date
+    let fling: Bool
     let overlay: SandboxScene.OverlaySettings
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -393,6 +483,13 @@ struct SandboxContainer: PlatformViewRepresentable {
     private func update(_ view: ZoomableSCNView, _ context: Context) {
         let c = context.coordinator
         let sim = state.sim
+        c.state = state
+        if fling != (view.flingHandler != nil) {
+            view.flingHandler = fling ? { [weak view, weak c] phase, point in
+                guard let view, let c else { return }
+                c.fling(view, phase, point)
+            } : nil
+        }
         if c.generation != generation || c.scene == nil {
             let scenario = state.scenario
             let scene = SandboxScene(scenario: scenario)
@@ -418,6 +515,7 @@ struct SandboxContainer: PlatformViewRepresentable {
         if let i = state.followedIndex { view.orbitCenter = scene.position(of: sim.bodies[i].id) }
         view.applyOrbit()
         c.showDisk = state.showAccretionDisk
+        scene.updateFling(state.flingDrag, sim: sim)
         c.cameraMoved(view)
     }
 
@@ -426,6 +524,25 @@ struct SandboxContainer: PlatformViewRepresentable {
         var generation = -1
         var labels: LabelOverlay?
         var showDisk = false
+        weak var state: SandboxState?
+
+        /// A fling-mode drag: hit the orbital plane through the camera's centre, update the
+        /// throw, and redraw (nothing else redraws while paused).
+        func fling(_ view: ZoomableSCNView, _ phase: FlingPhase, _ point: CGPoint) {
+            guard let state, let scene else { return }
+            let hit = scene.simPoint(view: view, point: point, planeY: view.orbitCenter.y)
+            switch phase {
+            case .began: if let hit { state.flingBegan(at: hit) }
+            case .changed: if let hit { state.flingMoved(to: hit) }
+            case .ended:
+                if let hit { state.flingMoved(to: hit) }
+                state.flingEnded()
+            case .cancelled: state.cancelFling()
+            }
+            scene.update(sim: state.sim)
+            scene.updateFling(state.flingDrag, sim: state.sim)
+            cameraMoved(view)
+        }
 
         /// Everything that depends on the camera: minimum body sizes, the lens, and labels
         /// (laid out here too: with the lens technique on, SceneKit's render callbacks don't
@@ -558,8 +675,89 @@ struct SandboxInfoCard: View {
 // MARK: - Controls
 
 /// Play / Pause and Reset.
+/// A throw being set up in fling mode. Offsets are from the dominant body (sim AU).
+struct FlingDrag {
+    var dominantID: Int
+    var dominantName: String
+    var startOffset: SIMD3<Double>
+    var endOffset: SIMD3<Double>
+    /// Distance from the dominant body: dragging this far gives circular-orbit speed.
+    var distance: Double
+    /// Speed as a multiple of circular speed (√2 escapes).
+    var ratio = 0.0
+    /// Predicted path, relative to the dominant body.
+    var path: [SIMD3<Double>] = []
+    var predictedFor: SIMD3<Double>?
+}
+
+enum FlingKind: String, CaseIterable, Identifiable {
+    case planet, gasGiant, moon, star, neutronStar, blackHole
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .planet: "Planet (1 Earth)"
+        case .gasGiant: "Gas giant (1 Jupiter)"
+        case .moon: "Moon (1 Luna)"
+        case .star: "Star (1 Sun)"
+        case .neutronStar: "Neutron star (1.4 Suns)"
+        case .blackHole: "Black hole (10 Suns)"
+        }
+    }
+
+    var noun: String {
+        switch self {
+        case .planet: "planet"
+        case .gasGiant: "giant"
+        case .moon: "moon"
+        case .star: "star"
+        case .neutronStar: "neutron star"
+        case .blackHole: "black hole"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .planet: "globe.americas.fill"
+        case .gasGiant: "circle.circle.fill"
+        case .moon: "moon.fill"
+        case .star: "sun.max.fill"
+        case .neutronStar: "sparkle"
+        case .blackHole: "circle.dashed"
+        }
+    }
+
+    var mass: Double { template(id: 0, name: "").mass }
+
+    private func template(id: Int, name: String) -> DesignBody {
+        switch self {
+        case .planet: return SandboxPhysicalDefaults.body(kind: .planet, id: id, name: name)
+        case .gasGiant:
+            var b = SandboxPhysicalDefaults.body(kind: .planet, id: id, name: name)
+            b.mass = SandboxUnits.jupiterMass
+            b.color = SIMD3(0.85, 0.72, 0.55)
+            SandboxPhysicalDefaults.applyMass(&b)
+            return b
+        case .moon: return SandboxPhysicalDefaults.body(kind: .moon, id: id, name: name)
+        case .star:
+            var b = SandboxPhysicalDefaults.body(kind: .star, id: id, name: name)
+            b.mass = 1
+            SandboxPhysicalDefaults.applyMass(&b)
+            return b
+        case .neutronStar: return SandboxPhysicalDefaults.body(kind: .neutronStar, id: id, name: name)
+        case .blackHole: return SandboxPhysicalDefaults.body(kind: .blackHole, id: id, name: name)
+        }
+    }
+
+    func body(id: Int, name: String) -> SandboxBody {
+        let d = template(id: id, name: name)
+        return SandboxBody(id: id, name: name, kind: d.kind, mass: d.mass, radius: d.radius,
+                           position: .zero, velocity: .zero, color: d.color)
+    }
+}
+
 struct SandboxPlayButtons: View {
-    let state: SandboxState
+    @Bindable var state: SandboxState
 
     var body: some View {
         HStack {
@@ -580,6 +778,34 @@ struct SandboxPlayButtons: View {
                     .padding(.vertical, 6)
             }
             .buttonStyle(.bordered)
+            .help("Back to the start (removes flung bodies)")
+            if !state.isEditing {
+                Button {
+                    state.flingMode.toggle()
+                } label: {
+                    Image(systemName: "scope")
+                        .font(.title3.weight(.semibold))
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.bordered)
+                .tint(state.flingMode ? .orange : nil)
+                .help("Fling mode: drag in the scene to throw a body in")
+                if state.flingMode {
+                    Menu {
+                        Picker("Throw", selection: $state.flingKind) {
+                            ForEach(FlingKind.allCases) { Label($0.label, systemImage: $0.icon).tag($0) }
+                        }
+                    } label: {
+                        Image(systemName: state.flingKind.icon)
+                            .font(.title3.weight(.semibold))
+                            .padding(.vertical, 6)
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.bordered)
+                    .fixedSize()
+                    .help("What to throw")
+                }
+            }
         }
         .controlSize(.large)
     }

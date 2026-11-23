@@ -155,3 +155,72 @@ struct SchwarzschildRayTests {
         #expect(a.last! > 2 * .pi)      // light circles the hole before escaping
     }
 }
+
+/// Fling mode: adding bodies mid-run, choosing the controlling body, predicting paths.
+struct FlingTests {
+    private func body(_ id: Int, _ name: String, mass: Double, p: SIMD3<Double> = .zero,
+                      v: SIMD3<Double> = .zero) -> SandboxBody {
+        SandboxBody(id: id, name: name, kind: .planet, mass: mass, radius: 1e-9, position: p, velocity: v, color: .one)
+    }
+    private var sun: SandboxBody {
+        SandboxBody(id: 0, name: "Sun", kind: .star, mass: 1, radius: SandboxUnits.sunRadius,
+                    position: .zero, velocity: .zero, color: .one)
+    }
+    private let vCirc1AU = 2 * Double.pi   // AU/yr at 1 AU around 1 M☉
+
+    @Test func addingKeepsEnergyBaseline() {
+        let sim = SandboxSimulation(bodies: [sun, body(1, "Earth", mass: SandboxUnits.earthMass, p: [1, 0, 0], v: [0, vCirc1AU, 0])],
+                                    options: SandboxOptions(relativity: false))
+        sim.advance(by: 0.3)
+        sim.add(body(2, "Flung", mass: SandboxUnits.jupiterMass, p: [0, 3, 0], v: [-vCirc1AU / sqrt(3), 0, 0]))
+        #expect(sim.energyDrift < 1e-9, "drift \(sim.energyDrift)")
+        sim.advance(by: 1)
+        #expect(sim.energyDrift < 1e-7, "drift \(sim.energyDrift)")
+    }
+
+    @Test func circularFlingStaysCircular() {
+        let sim = SandboxSimulation(bodies: [sun], options: SandboxOptions(relativity: false))
+        let r = 2.0, v = vCirc1AU / sqrt(r)
+        sim.add(body(1, "Flung", mass: SandboxUnits.earthMass, p: [r, 0, 0], v: [0, v, 0]))
+        var lo = Double.infinity, hi = 0.0
+        for _ in 0..<100 {
+            sim.advance(by: sqrt(r * r * r) / 100)
+            let d = simd_length(sim.bodies[1].position - sim.bodies[0].position)
+            lo = min(lo, d); hi = max(hi, d)
+        }
+        #expect(lo > r * 0.98 && hi < r * 1.02, "\(lo)–\(hi)")
+    }
+
+    @Test func fastFlingEscapes() {
+        let sim = SandboxSimulation(bodies: [sun], options: SandboxOptions(relativity: false))
+        sim.add(body(1, "Flung", mass: SandboxUnits.earthMass, p: [1, 0, 0], v: [0, 1.5 * vCirc1AU, 0]))
+        var last = 1.0
+        for _ in 0..<20 {
+            sim.advance(by: 0.5)
+            let d = simd_length(sim.bodies[1].position)
+            #expect(d > last); last = d
+        }
+        let b = sim.bodies[1]
+        #expect(simd_length_squared(b.velocity) / 2 - SandboxUnits.G / simd_length(b.position) > 0)
+    }
+
+    @Test func dominantBodyFollowsHillSpheres() {
+        let earth = body(1, "Earth", mass: SandboxUnits.earthMass, p: [1, 0, 0], v: [0, vCirc1AU, 0])
+        let sim = SandboxSimulation(bodies: [sun, earth], options: SandboxOptions(relativity: false))
+        #expect(sim.dominantBody(at: [1.001, 0, 0]) == 1)
+        #expect(sim.dominantBody(at: [3, 0, 0]) == 0)
+        #expect(sim.dominantBody(at: [1.05, 0, 0]) == 0)   // Earth's Hill sphere is 0.01 AU
+    }
+
+    @Test func predictionMatchesTheRealRun() {
+        let earth = body(1, "Earth", mass: SandboxUnits.earthMass, p: [1, 0, 0], v: [0, vCirc1AU, 0])
+        let sim = SandboxSimulation(bodies: [sun, earth], options: SandboxOptions(relativity: false))
+        let flung = body(2, "Flung", mass: SandboxUnits.earthMass, p: [0, 1.5, 0], v: [-4, 0.5, 0])
+        let path = sim.predictPath(adding: flung, relativeTo: 0, duration: 1, samples: 100, budget: 5)
+        #expect(path.count == 101)
+        sim.add(flung)
+        sim.advance(by: 1)
+        let actual = sim.bodies[2].position - sim.bodies[0].position
+        #expect(simd_length(actual - path.last!) < 1e-5, "\(actual) vs \(path.last!)")
+    }
+}

@@ -3,10 +3,14 @@ import SceneKit
 import SpriteKit
 import AVFoundation
 
+/// Stages of a fling-mode drag (see `ZoomableSCNView.flingHandler`).
+enum FlingPhase { case began, changed, ended, cancelled }
+
 #if os(iOS)
 import UIKit
 typealias PlatformViewRepresentable = UIViewRepresentable
 typealias SCNFloat = Float
+typealias PlatformPanState = UIGestureRecognizer.State
 
 class ZoomableSCNView: SCNView {
     weak var cameraNode: SCNNode?
@@ -15,6 +19,10 @@ class ZoomableSCNView: SCNView {
     var orbitCenter = SCNVector3Zero
     /// Called after the user orbits or zooms, for views that must refresh camera-dependent state while paused.
     var onUserCameraMove: (() -> Void)?
+    /// Fling mode: while set, one-finger (left-button) drags go here instead of orbiting,
+    /// and the camera orbits with a two-finger (right-button or ⌥) drag.
+    var flingHandler: ((FlingPhase, CGPoint) -> Void)? { didSet { altOrbitPan?.isEnabled = flingHandler != nil } }
+    private var panFlinging = false
     var minDistance: Float = 5
     var maxDistance: Float = 900
 
@@ -29,7 +37,28 @@ class ZoomableSCNView: SCNView {
         addGestureRecognizer(pan)
 
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.delegate = self
         addGestureRecognizer(pinch)
+
+        let two = UIPanGestureRecognizer(target: self, action: #selector(handleAltOrbit(_:)))
+        two.minimumNumberOfTouches = 2
+        two.maximumNumberOfTouches = 2
+        two.isEnabled = flingHandler != nil
+        two.delegate = self
+        addGestureRecognizer(two)
+        altOrbitPan = two
+    }
+
+    private var altOrbitPan: UIPanGestureRecognizer?
+
+    @objc private func handleAltOrbit(_ r: UIPanGestureRecognizer) {
+        let t = r.translation(in: self)
+        r.setTranslation(.zero, in: self)
+        azimuth   += Float(t.x) * 0.005
+        elevation -= Float(t.y) * 0.005
+        elevation  = max(-Float.pi/2 + 0.02, min(Float.pi/2 - 0.02, elevation))
+        applyOrbit()
+        onUserCameraMove?()
     }
 
     func syncOrbit() {
@@ -43,6 +72,8 @@ class ZoomableSCNView: SCNView {
     }
 
     @objc private func handleOrbit(_ r: UIPanGestureRecognizer) {
+        if r.state == .began { panFlinging = flingHandler != nil }
+        if panFlinging { sendFling(r.state, r.location(in: self)); return }
         let t = r.translation(in: self)
         r.setTranslation(.zero, in: self)
         azimuth   += Float(t.x) * 0.005
@@ -74,11 +105,27 @@ class ZoomableSCNView: SCNView {
         cam.position = SCNVector3(orbitCenter.x + SCNFloat(x), orbitCenter.y + SCNFloat(y), orbitCenter.z + SCNFloat(z))
         cam.look(at: orbitCenter)
     }
+
+    private func sendFling(_ state: PlatformPanState, _ p: CGPoint) {
+        switch state {
+        case .began: flingHandler?(.began, p)
+        case .changed: flingHandler?(.changed, p)
+        case .ended: flingHandler?(.ended, p)
+        default: flingHandler?(.cancelled, p)
+        }
+    }
+}
+extension ZoomableSCNView: UIGestureRecognizerDelegate {
+    /// Pinch and two-finger orbit work together.
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
 }
 #else
 import AppKit
 typealias PlatformViewRepresentable = NSViewRepresentable
 typealias SCNFloat = CGFloat
+typealias PlatformPanState = NSGestureRecognizer.State
 
 // Custom SCNView with manual orbit (left-drag) + logarithmic zoom (scroll/pinch).
 class ZoomableSCNView: SCNView {
@@ -88,6 +135,10 @@ class ZoomableSCNView: SCNView {
     var orbitCenter = SCNVector3Zero
     /// Called after the user orbits or zooms, for views that must refresh camera-dependent state while paused.
     var onUserCameraMove: (() -> Void)?
+    /// Fling mode: while set, one-finger (left-button) drags go here instead of orbiting,
+    /// and the camera orbits with a two-finger (right-button or ⌥) drag.
+    var flingHandler: ((FlingPhase, CGPoint) -> Void)? { didSet { altOrbitPan?.isEnabled = flingHandler != nil } }
+    private var panFlinging = false
     var minDistance: Float = 5
     var maxDistance: Float = 900
 
@@ -99,7 +150,14 @@ class ZoomableSCNView: SCNView {
         let pan = NSPanGestureRecognizer(target: self, action: #selector(handleOrbit(_:)))
         pan.buttonMask = 0x1
         addGestureRecognizer(pan)
+        let right = NSPanGestureRecognizer(target: self, action: #selector(handleAltOrbit(_:)))
+        right.buttonMask = 0x2
+        right.isEnabled = flingHandler != nil
+        addGestureRecognizer(right)
+        altOrbitPan = right
     }
+
+    private var altOrbitPan: NSPanGestureRecognizer?
 
     // SCNVector3 components are CGFloat on macOS; convert to Float for trig ops.
     func syncOrbit() {
@@ -113,6 +171,14 @@ class ZoomableSCNView: SCNView {
     }
 
     @objc private func handleOrbit(_ r: NSPanGestureRecognizer) {
+        if r.state == .began { panFlinging = flingHandler != nil && !NSEvent.modifierFlags.contains(.option) }
+        if panFlinging { sendFling(r.state, r.location(in: self)); return }
+        orbit(by: r)
+    }
+
+    @objc private func handleAltOrbit(_ r: NSPanGestureRecognizer) { orbit(by: r) }
+
+    private func orbit(by r: NSPanGestureRecognizer) {
         let t = r.translation(in: self)
         r.setTranslation(.zero, in: self)
         azimuth   += Float(t.x) * 0.005
@@ -152,6 +218,15 @@ class ZoomableSCNView: SCNView {
         let z = distance * cos(elevation) * cos(azimuth)
         cam.position = SCNVector3(orbitCenter.x + SCNFloat(x), orbitCenter.y + SCNFloat(y), orbitCenter.z + SCNFloat(z))
         cam.look(at: orbitCenter)
+    }
+
+    private func sendFling(_ state: PlatformPanState, _ p: CGPoint) {
+        switch state {
+        case .began: flingHandler?(.began, p)
+        case .changed: flingHandler?(.changed, p)
+        case .ended: flingHandler?(.ended, p)
+        default: flingHandler?(.cancelled, p)
+        }
     }
 }
 #endif

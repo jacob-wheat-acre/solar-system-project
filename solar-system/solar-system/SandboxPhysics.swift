@@ -114,7 +114,7 @@ nonisolated final class SandboxSimulation {
     private(set) var log: [(time: Double, message: String)] = []
     var rtol = 1e-10
     private var h: Double
-    private let initialNewtonianEnergy: Double
+    private var initialNewtonianEnergy: Double
 
     var c: Double { SandboxUnits.c * options.cScale }
 
@@ -454,6 +454,61 @@ nonisolated final class SandboxSimulation {
 
     /// Next unused body id.
     var nextID: Int { (bodies.map(\.id).max() ?? 0) + 1 }
+
+    // MARK: Adding bodies (fling mode)
+
+    /// Add a body mid-run. The energy baseline moves by the energy it brings, so the
+    /// drift readout keeps measuring the integrator rather than the new arrival.
+    func add(_ b: SandboxBody) {
+        let before = Self.newtonianEnergy(bodies)
+        var shortest = Double.infinity
+        for o in bodies {
+            let r = simd_length(b.position - o.position)
+            shortest = min(shortest, sqrt(r * r * r / (b.mass + o.mass)))
+        }
+        bodies.append(b)
+        initialNewtonianEnergy += Self.newtonianEnergy(bodies) - before
+        fsal = nil
+        if shortest.isFinite { h = min(h, shortest * 1e-3) }
+        trailInterval.removeAll()
+    }
+
+    /// The body that controls motion at `p`: the one with the smallest Hill sphere
+    /// containing it (a planet near a planet, the star elsewhere). The heaviest body's
+    /// sphere is unbounded.
+    func dominantBody(at p: SIMD3<Double>) -> Int? {
+        guard let heaviest = bodies.indices.max(by: { bodies[$0].mass < bodies[$1].mass }) else { return nil }
+        var best = heaviest, bestHill = Double.infinity
+        for j in bodies.indices where j != heaviest {
+            guard let k = primary(of: j) else { continue }
+            let a = simd_length(bodies[j].position - bodies[k].position)
+            let hill = a * cbrt(bodies[j].mass / (3 * bodies[k].mass))
+            if simd_length(p - bodies[j].position) < hill && hill < bestHill { best = j; bestHill = hill }
+        }
+        return best
+    }
+
+    /// Where body `b` would go if added now: its positions relative to body `relativeTo`,
+    /// sampled `samples` times over `duration` years (shorter if `budget` runs out or it
+    /// merges). Runs a scratch copy with the same physics as the live sim.
+    func predictPath(adding b: SandboxBody, relativeTo ref: Int, duration: Double, samples: Int = 240,
+                     budget: TimeInterval = 0.012) -> [SIMD3<Double>] {
+        let scratch = SandboxSimulation(bodies: bodies + [b], options: options)
+        scratch.rtol = max(rtol, 1e-9)
+        let refID = bodies[ref].id
+        let start = CFAbsoluteTimeGetCurrent()
+        var out: [SIMD3<Double>] = []
+        for k in 0...samples {
+            if k > 0 {
+                let left = budget - (CFAbsoluteTimeGetCurrent() - start)
+                guard left > 0, scratch.advance(by: duration / Double(samples), budget: left) else { break }
+            }
+            guard let me = scratch.bodies.first(where: { $0.id == b.id }),
+                  let r = scratch.bodies.first(where: { $0.id == refID }) else { break }
+            out.append(me.position - r.position)
+        }
+        return out
+    }
 }
 
 // MARK: - Orbit setup helper

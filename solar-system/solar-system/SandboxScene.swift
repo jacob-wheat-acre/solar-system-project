@@ -241,6 +241,79 @@ final class SandboxScene {
         }
     }
 
+    // MARK: Fling
+
+    private let flingNode = SCNNode()
+
+    /// Where a screen point's ray meets the horizontal plane at scene height `planeY`, in
+    /// sim coordinates (AU), or nil if it misses (looking away from the plane).
+    func simPoint(view: SCNView, point: CGPoint, planeY: SCNFloat) -> SIMD3<Double>? {
+        let a = simd_double3(view.unprojectPoint(SCNVector3(SCNFloat(point.x), SCNFloat(point.y), 0)))
+        let b = simd_double3(view.unprojectPoint(SCNVector3(SCNFloat(point.x), SCNFloat(point.y), 1)))
+        let cam = simd_double3(cameraNode.worldPosition)
+        // Depth may be reversed, so aim from the camera through whichever point is farther.
+        let dir = simd_distance(a, cam) > simd_distance(b, cam) ? a - cam : b - cam
+        guard abs(dir.y) > 1e-12 else { return nil }
+        let t = (Double(planeY) - cam.y) / dir.y
+        guard t > 0 else { return nil }
+        let q = cam + t * dir
+        return SIMD3(q.x / scale, q.z / scale, q.y / scale)
+    }
+
+    /// The throw being set up: start marker, arrow (green slower than circular, yellow
+    /// bound, red escaping), ticks at circular and escape speed, and the predicted path.
+    func updateFling(_ f: FlingDrag?, sim: SandboxSimulation) {
+        if flingNode.parent == nil { root.addChildNode(flingNode) }
+        flingNode.childNodes.forEach { $0.removeFromParentNode() }
+        guard let f, let c = sim.bodies.first(where: { $0.id == f.dominantID }) else { return }
+        func v(_ p: SIMD3<Double>) -> simd_float3 { simd_float3(scenePosition(c.position + p)) }
+        func n(_ p: simd_float3) -> SCNVector3 { SCNVector3(p) }
+        let s = v(f.startOffset), e = v(f.endOffset)
+        let col: NSColorLike = f.ratio < 0.98 ? NSColorLike(red: 0.45, green: 0.95, blue: 0.5, alpha: 1)
+            : f.ratio < 2.0.squareRoot() ? NSColorLike(red: 1, green: 0.85, blue: 0.3, alpha: 1)
+            : NSColorLike(red: 1, green: 0.4, blue: 0.35, alpha: 1)
+        let m = SceneLines.material(col)
+        let camDist = simd_distance(s, simd_float3(cameraNode.worldPosition))
+
+        let marker = SCNNode(geometry: SCNSphere(radius: CGFloat(camDist * 0.006)))
+        marker.geometry?.firstMaterial = SceneLines.material(col)
+        marker.position = n(s)
+        flingNode.addChildNode(marker)
+
+        let along = e - s, len = simd_length(along)
+        guard len > 0 else { return }
+        let u = along / len
+        let side = simd_normalize(simd_cross(u, simd_float3(0, 1, 0)))
+        let dScene = Float(f.distance * scale)
+        var pts = [s, e]
+        let head = min(0.25 * len, 0.12 * dScene)
+        pts += [e, e - head * u + 0.5 * head * side, e, e - head * u - 0.5 * head * side]
+        let lines = SCNNode(geometry: SCNGeometry(
+            sources: [SCNGeometrySource(vertices: pts.map(n))],
+            elements: [SCNGeometryElement(indices: (0..<Int32(pts.count)).map { $0 }, primitiveType: .line)]))
+        lines.geometry?.materials = [m]
+        flingNode.addChildNode(lines)
+
+        // Ticks where the arrow reaches circular (1×) and escape (√2×) speed.
+        var ticks: [simd_float3] = []
+        let marks: [Float] = [1, Float(2).squareRoot()]
+        for k in marks {
+            let p: simd_float3 = s + (k * dScene) * u
+            let w: Float = 0.06 * dScene
+            ticks.append(p - w * side)
+            ticks.append(p + w * side)
+        }
+        let tickNode = SCNNode(geometry: SCNGeometry(
+            sources: [SCNGeometrySource(vertices: ticks.map(n))],
+            elements: [SCNGeometryElement(indices: [0, 1, 2, 3], primitiveType: .line)]))
+        tickNode.geometry?.materials = [SceneLines.material(NSColorLike(white: 1, alpha: 0.6))]
+        flingNode.addChildNode(tickNode)
+
+        if f.path.count > 2 {
+            flingNode.addChildNode(SCNNode(geometry: dashed(f.path.map { scenePosition(c.position + $0) }, m)))
+        }
+    }
+
     /// Every other segment of a polyline.
     private func dashed(_ pts: [SCNVector3], _ m: SCNMaterial) -> SCNGeometry {
         var idx: [Int32] = []

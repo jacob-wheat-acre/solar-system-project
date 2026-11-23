@@ -382,6 +382,11 @@ struct SandboxContainer: PlatformViewRepresentable {
         #endif
         context.coordinator.labels = LabelOverlay(view: view)
         view.delegate = context.coordinator
+        // While paused nothing else redraws, so camera moves refresh the lens, sizes and labels.
+        view.onUserCameraMove = { [weak view, weak coordinator = context.coordinator] in
+            guard let view, let coordinator else { return }
+            coordinator.cameraMoved(view)
+        }
         return view
     }
 
@@ -412,32 +417,43 @@ struct SandboxContainer: PlatformViewRepresentable {
         scene.updateOverlay(overlay, design: state.design)
         if let i = state.followedIndex { view.orbitCenter = scene.position(of: sim.bodies[i].id) }
         view.applyOrbit()
-        scene.updateForCamera(distance: view.orbitDistance)
-        updateLens(view, c, scene)
-    }
-
-    /// Ray-traced black holes: the lens pass runs only while the system has one.
-    private func updateLens(_ view: ZoomableSCNView, _ c: Coordinator, _ scene: SandboxScene) {
-        guard scene.hasBlackHoles else {
-            if view.technique != nil { view.technique = nil }
-            scene.lensActive = false
-            return
-        }
-        if c.lens == nil { c.lens = BlackHoleLens.makeTechnique() }
-        guard let lens = c.lens else { scene.lensActive = false; return }
-        if view.technique !== lens { view.technique = lens }
-        scene.lensActive = true
-        BlackHoleLens.set(lens, camera: scene.cameraNode, viewport: view.bounds.size, reverseZ: view.usesReverseZ,
-                          holes: scene.lensHoles(), disk: state.showAccretionDisk)
+        c.showDisk = state.showAccretionDisk
+        c.cameraMoved(view)
     }
 
     final class Coordinator: NSObject, SCNSceneRendererDelegate {
         var scene: SandboxScene?
-        var lens: SCNTechnique?
         var generation = -1
         var labels: LabelOverlay?
+        var showDisk = false
 
-        func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        /// Everything that depends on the camera: minimum body sizes, the lens, and labels
+        /// (laid out here too: with the lens technique on, SceneKit's render callbacks don't
+        /// reliably fire, and the labels would freeze).
+        func cameraMoved(_ view: ZoomableSCNView) {
+            guard let scene else { return }
+            scene.updateForCamera(distance: view.orbitDistance)
+            updateLens(view, scene)
+            labels?.layout(scene.labelAnchors())
+        }
+
+        /// Ray-traced black holes: the lens pass runs only while the system has one.
+        private func updateLens(_ view: ZoomableSCNView, _ scene: SandboxScene) {
+            guard scene.hasBlackHoles else {
+                if view.technique != nil { view.technique = nil }
+                scene.lensActive = false
+                return
+            }
+            // The view keeps its own copy of a technique, so install it once and then update
+            // the view's copy; comparing against our instance would reinstall it every frame.
+            if view.technique == nil { view.technique = BlackHoleLens.makeTechnique() }
+            guard let lens = view.technique else { scene.lensActive = false; return }
+            scene.lensActive = true
+            BlackHoleLens.set(lens, camera: scene.cameraNode, viewport: view.bounds.size, reverseZ: view.usesReverseZ,
+                              holes: scene.lensHoles(), disk: showDisk)
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
             DispatchQueue.main.async { [weak self] in
                 guard let self, let scene = self.scene else { return }
                 self.labels?.layout(scene.labelAnchors())

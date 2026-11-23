@@ -13,6 +13,8 @@ class ZoomableSCNView: SCNView {
 
     /// Point the camera orbits around and looks at (moved per frame by views that follow a target).
     var orbitCenter = SCNVector3Zero
+    /// Called after the user orbits or zooms, for views that must refresh camera-dependent state while paused.
+    var onUserCameraMove: (() -> Void)?
     var minDistance: Float = 5
     var maxDistance: Float = 900
 
@@ -47,6 +49,7 @@ class ZoomableSCNView: SCNView {
         elevation -= Float(t.y) * 0.005  // UIKit y-axis is inverted vs AppKit
         elevation  = max(-Float.pi/2 + 0.02, min(Float.pi/2 - 0.02, elevation))
         applyOrbit()
+        onUserCameraMove?()
     }
 
     @objc private func handlePinch(_ r: UIPinchGestureRecognizer) {
@@ -55,6 +58,7 @@ class ZoomableSCNView: SCNView {
         distance = max(minDistance, min(maxDistance, Float(Double(distance) * exp(-magnification * 2.0))))
         r.scale = 1.0
         applyOrbit()
+        onUserCameraMove?()
     }
 
     var orbitDistance: Float {
@@ -82,6 +86,8 @@ class ZoomableSCNView: SCNView {
 
     /// Point the camera orbits around and looks at (moved per frame by views that follow a target).
     var orbitCenter = SCNVector3Zero
+    /// Called after the user orbits or zooms, for views that must refresh camera-dependent state while paused.
+    var onUserCameraMove: (() -> Void)?
     var minDistance: Float = 5
     var maxDistance: Float = 900
 
@@ -113,6 +119,7 @@ class ZoomableSCNView: SCNView {
         elevation += Float(t.y) * 0.005
         elevation  = max(-Float.pi/2 + 0.02, min(Float.pi/2 - 0.02, elevation))
         applyOrbit()
+        onUserCameraMove?()
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -130,6 +137,7 @@ class ZoomableSCNView: SCNView {
         guard abs(factor - 1.0) > 0.0001 else { return }
         distance = max(minDistance, min(maxDistance, Float(Double(distance) * factor)))
         applyOrbit()
+        onUserCameraMove?()
     }
 
     var orbitDistance: Float {
